@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-HK">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Meeting Copilot</title>
+  <!-- Inline so the page needs nothing from the network but its own two files. -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%235aa9e6'/></svg>">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+
+<header class="bar">
+  <div class="bar-left">
+    <span class="dot" id="conn-dot" title="server connection"></span>
+    <strong>Meeting Copilot</strong>
+    <span class="muted small">{{ language }} &middot; {{ models }}</span>
+  </div>
+
+  <div class="bar-right">
+    <span id="status-text" class="muted small">idle</span>
+    <span id="elapsed" class="mono small">00:00</span>
+    <button id="btn-start" class="primary">Start meeting</button>
+    <button id="btn-stop" class="danger" hidden>Stop</button>
+  </div>
+</header>
+
+{% if missing_keys %}
+<div class="banner error">
+  Missing configuration: <strong>{{ missing_keys|join(', ') }}</strong>.
+  Copy <code>.env.example</code> to <code>.env</code>, fill it in, and restart.
+</div>
+{% endif %}
+
+<!-- Pre-meeting setup: the brief is what makes the advice specific. -->
+<section id="setup" class="setup">
+  <div class="setup-grid">
+    <label>
+      Meeting title
+      <input id="in-title" type="text" placeholder="e.g. Q3 planning with the ops team">
+    </label>
+    <label>
+      Microphone
+      <select id="in-mic-mode">
+        <option value="voice" selected>Voice (noise suppression on)</option>
+        <option value="room">Room (raw mic, nothing filtered)</option>
+      </select>
+    </label>
+  </div>
+  <label class="brief-label">
+    Brief &mdash; who is in the room, what you want out of it, jargon and names the
+    transcriber will mangle. The copilot reads this before every suggestion.
+    <textarea id="in-brief" rows="4" placeholder="同事 Alan、Wing 同財務部開會，討論 Q3 budget。我想爭取多兩個 headcount。留意 project 代號 Falcon、系統名 NocolyHAP。"></textarea>
+  </label>
+</section>
+
+<main class="grid">
+
+  <!-- top left -->
+  <section class="panel" id="panel-transcript">
+    <div class="panel-head">
+      <h2>Live transcript</h2>
+      <label class="toggle small"><input type="checkbox" id="chk-autoscroll" checked> follow</label>
+    </div>
+    <div class="panel-body" id="transcript">
+      <p class="empty">Transcript appears here once the meeting starts.</p>
+    </div>
+    <div class="interim" id="interim"></div>
+  </section>
+
+  <!-- top right -->
+  <section class="panel" id="panel-advice">
+    <div class="panel-head">
+      <h2>Copilot</h2>
+      <span class="muted small">
+        {% if web_search %}web search on{% else %}web search off &mdash; set TAVILY_API_KEY{% endif %}
+      </span>
+    </div>
+    <div class="panel-body" id="advice">
+      <p class="empty">Key points, questions to ask, and answers to questions raised will appear here.</p>
+    </div>
+  </section>
+
+  <!-- bottom left -->
+  <section class="panel" id="panel-session">
+    <div class="panel-head">
+      <h2>Session</h2>
+      <span class="muted small" id="stt-model"></span>
+    </div>
+    <div class="panel-body">
+      <form id="ask-form" class="ask">
+        <input id="in-ask" type="text" placeholder="Ask the copilot anything, mid-meeting…" autocomplete="off">
+        <button type="submit">Ask</button>
+      </form>
+
+      <dl class="stats">
+        <div><dt>Estimated cost</dt><dd class="mono big" id="cost-total">$0.0000</dd></div>
+        <div><dt>Speech to text</dt><dd class="mono" id="cost-stt">$0.0000</dd></div>
+        <div><dt>LLM</dt><dd class="mono" id="cost-llm">$0.0000</dd></div>
+        <div><dt>Audio sent</dt><dd class="mono" id="stat-audio">0.00 min</dd></div>
+        <div><dt>LLM calls</dt><dd class="mono" id="stat-calls">0</dd></div>
+        <div><dt>Tokens in / out</dt><dd class="mono" id="stat-tokens">0 / 0</dd></div>
+      </dl>
+
+      <div class="exports">
+        <button id="btn-dl-transcript" class="ghost">Download transcript</button>
+        <button id="btn-dl-notes" class="ghost">Download notes</button>
+      </div>
+
+      <h3 class="sub">Rolling summary</h3>
+      <p class="muted small" id="summary">Builds up once the meeting has some length to it.</p>
+
+      <h3 class="sub">Log</h3>
+      <div class="log" id="log"></div>
+    </div>
+  </section>
+
+  <!-- bottom right -->
+  <section class="panel" id="panel-notes">
+    <div class="panel-head">
+      <h2>Notes</h2>
+      <span class="muted small" id="notes-updated"></span>
+    </div>
+    <div class="panel-body">
+      <div id="notes">
+        <p class="empty">Decisions, action items and open questions are collected as you go.</p>
+      </div>
+      <h3 class="sub">My notes <span class="muted small">(yours; the copilot never edits this)</span></h3>
+      <textarea id="user-notes" rows="6" placeholder="Type anything you want to keep…"></textarea>
+      <div class="save-hint muted small" id="notes-save-hint"></div>
+    </div>
+  </section>
+
+</main>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+*.sqlite3
+*.wav
+.DS_Store
