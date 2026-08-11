@@ -11,6 +11,7 @@ import time
 import wave
 
 import config
+from copilot.brief import Brief
 from copilot.engine import CopilotEngine
 from copilot.llm import OpenRouterClient
 from copilot.state import MeetingState
@@ -24,13 +25,14 @@ MAX_SAMPLE_RATE = 48000
 
 
 class MeetingSession:
-    def __init__(self, title: str, brief: str, sample_rate: int, emit):
+    def __init__(self, brief: Brief, sample_rate: int, emit):
         self.sample_rate = _validate_sample_rate(sample_rate)
         self._emit = emit
         self._lock = threading.Lock()
 
         self.stt_status = {"state": "starting", "detail": ""}
-        self.cards: list[dict] = []  # advice + answer cards, newest last
+        self.cards: list[dict] = []  # copilot panel: advice + answers
+        self.attendee_turns: list[dict] = []  # what the AI attendee has said
         self.interim = ""
         self.error: str | None = None
         # An event rather than a flag, so the cost ticker can wait on it and exit
@@ -38,12 +40,12 @@ class MeetingSession:
         self._stopped = threading.Event()
 
         self.meeting_id = db.create_meeting(
-            title=title,
-            brief=brief,
+            title=brief.title,
+            brief=brief.as_dict(),
             language=config.DEEPGRAM_LANGUAGE,
             stt_model=config.DEEPGRAM_MODELS[0] if config.DEEPGRAM_MODELS else "",
         )
-        self.state = MeetingState(meeting_id=self.meeting_id, title=title, brief=brief)
+        self.state = MeetingState(meeting_id=self.meeting_id, brief=brief)
 
         # The client owns the usage counter; cost() reads it back rather than
         # keeping a second copy that could drift out of step.
@@ -55,6 +57,7 @@ class MeetingSession:
             sample_rate=self.sample_rate,
             language=config.DEEPGRAM_LANGUAGE,
             models=config.DEEPGRAM_MODELS,
+            keyterms=brief.keyterms() if config.DEEPGRAM_KEYTERMS else [],
             on_interim=self._on_interim,
             on_utterance=self._on_utterance,
             on_status=self._on_stt_status,
@@ -116,8 +119,10 @@ class MeetingSession:
         with self.state.lock:
             notes = dict(self.state.notes)
             summary = self.state.rolling_summary
+            speakers = dict(self.state.speaker_names)
         db.save_notes(self.meeting_id, notes)
         db.save_summary(self.meeting_id, summary)
+        db.save_speakers(self.meeting_id, speakers)
         db.finish_meeting(
             self.meeting_id, self.stt.audio_seconds, self.llm.usage.snapshot(), self.stt.model
         )
@@ -133,6 +138,31 @@ class MeetingSession:
             self.state.user_notes = text
         db.save_user_notes(self.meeting_id, text)
 
+    # ---------------------------------------------------------------- speakers
+
+    def set_speaker_name(self, speaker: int, name: str) -> None:
+        """Attach a name to a diarised voice. Relabels the whole transcript."""
+        self.state.set_speaker_name(speaker, name)
+        with self.state.lock:
+            names = dict(self.state.speaker_names)
+        db.save_speakers(self.meeting_id, names)
+        self._emit("speakers", {"speaker_names": _stringify(names)})
+
+    def apply_speaker_suggestion(self, accept: bool) -> None:
+        with self.state.lock:
+            suggestion = self.state.speaker_suggestion
+            self.state.speaker_suggestion = None
+        if not suggestion:
+            return
+        if accept:
+            for proposal in suggestion.get("proposals") or []:
+                self.state.set_speaker_name(proposal["speaker"], proposal["name"])
+            with self.state.lock:
+                names = dict(self.state.speaker_names)
+            db.save_speakers(self.meeting_id, names)
+            self._emit("speakers", {"speaker_names": _stringify(names)})
+        self._emit("speaker_suggestion_cleared", {})
+
     # ------------------------------------------------------------- STT handlers
 
     def _on_interim(self, text: str) -> None:
@@ -143,7 +173,9 @@ class MeetingSession:
         seg = self.state.add_utterance(utt.text, utt.speaker)
         db.add_segment(self.meeting_id, seg.index, seg.at, seg.speaker, seg.text)
         self.interim = ""
-        self._emit("segment", seg.as_dict())
+        with self.state.lock:
+            names = dict(self.state.speaker_names)
+        self._emit("segment", seg.as_dict(names))
         self._emit("cost", self.cost())
         self.engine.on_utterance(seg)
 
@@ -166,16 +198,19 @@ class MeetingSession:
 
     def _engine_emit(self, event: str, payload: dict) -> None:
         if event in ("advice", "answer"):
-            card = {"kind": event, **payload}
-            self.cards.append(card)
+            self.cards.append({"kind": event, **payload})
             del self.cards[:-60]
+            db.add_event(self.meeting_id, event, payload)
+        elif event == "attendee":
+            self.attendee_turns.append(payload)
+            del self.attendee_turns[:-40]
             db.add_event(self.meeting_id, event, payload)
         elif event == "notes":
             db.save_notes(self.meeting_id, payload.get("notes") or {})
         elif event == "summary":
             db.save_summary(self.meeting_id, payload.get("summary") or "")
         self._emit(event, payload)
-        if event in ("advice", "answer", "notes", "usage"):
+        if event in ("advice", "answer", "attendee", "notes", "usage"):
             self._emit("cost", self.cost())
 
     # -------------------------------------------------------------------- cost
@@ -199,21 +234,26 @@ class MeetingSession:
     def snapshot(self) -> dict:
         """Everything a freshly loaded page needs to render the meeting."""
         with self.state.lock:
+            names = dict(self.state.speaker_names)
             return {
                 "meeting_id": self.meeting_id,
-                "title": self.state.title,
-                "brief": self.state.brief,
+                "brief": self.state.brief.as_dict(),
+                "title": self.state.brief.title,
                 "running": not self.stopped,
                 "status": self.stt_status,
                 "error": self.error,
                 "interim": self.interim,
-                "segments": [s.as_dict() for s in self.state.segments],
+                "segments": [s.as_dict(names) for s in self.state.segments],
+                "speaker_names": _stringify(names),
+                "speaker_suggestion": self.state.speaker_suggestion,
                 "cards": list(self.cards),
+                "attendee_turns": list(self.attendee_turns),
                 "notes": dict(self.state.notes),
                 "user_notes": self.state.user_notes,
                 "summary": self.state.rolling_summary,
                 "cost": self.cost(),
                 "web_search": bool(config.TAVILY_API_KEY),
+                "attendee_enabled": config.ATTENDEE_ENABLED,
             }
 
     # ------------------------------------------------------------ audio to disk
@@ -239,6 +279,11 @@ class MeetingSession:
             except Exception:
                 log.exception("failed to close audio file")
             self._wav = None
+
+
+def _stringify(names: dict) -> dict:
+    """JSON object keys must be strings; the browser converts back."""
+    return {str(k): v for k, v in names.items()}
 
 
 def _validate_sample_rate(value) -> int:

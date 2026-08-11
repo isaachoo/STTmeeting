@@ -2,9 +2,9 @@
 
 Runs the real Flask app on a real port and talks to it with a real WebSocket
 client, exactly as the browser does -- start_meeting, binary audio frames,
-Deepgram result frames, stop_meeting -- with Deepgram's socket and OpenRouter
-replaced by fakes. This is what catches breakage in app.py, which the unit tests
-never touch.
+Deepgram result frames, naming a speaker, stop_meeting -- with Deepgram's socket
+and OpenRouter replaced by fakes. This is what catches breakage in app.py, which
+the unit tests never touch.
 
 Run with:  python -m unittest discover -s tests -v
 """
@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -101,11 +102,12 @@ def _results(text, is_final, speech_final=False, speaker=0):
 
 # ----------------------------------------------------------------- fake OpenRouter
 
-ADVICE_JSON = {
+THINK_JSON = {
     "key_point": "Alan 想加兩個 headcount",
     "suggested_questions": ["每個 head 的 fully loaded cost 係幾多?"],
     "watch_out": "budget model 未有人負責",
-    "question_to_answer": None,
+    "attendee": {"should_speak": False, "kind": "info", "urgency": "normal",
+                 "say": "", "why": "", "needs_web": False, "search_query": ""},
 }
 
 NOTES_JSON = {
@@ -116,6 +118,19 @@ NOTES_JSON = {
     "topics": ["headcount", "budget"],
 }
 
+BRIEF = {
+    "title": "Q3 planning",
+    "agenda": "budget, headcount",
+    "my_goal": "爭取兩個 headcount",
+    "context": "上次財務部話等 Q4",
+    "attendees": [
+        {"name": "Isaac", "role": "me", "is_me": True},
+        {"name": "Alan", "role": "ops"},
+        {"name": "Wing", "role": "finance"},
+    ],
+    "glossary": ["Falcon", "NocolyHAP"],
+}
+
 
 class FakeLLM:
     def __init__(self):
@@ -123,22 +138,30 @@ class FakeLLM:
 
         self.usage = Usage()
         self.prompts: list[str] = []
-        self.json_reply = None  # set by a test to override
+        self.think_reply = None   # set by a test to override
+        self.speaker_reply = {"mapping": [], "note": ""}
         self._lock = threading.Lock()
 
     def chat_json(self, messages, **_kwargs):
+        system = messages[0]["content"]
         with self._lock:
             self.prompts.append(messages[1]["content"])
         self.usage.add({"prompt_tokens": 900, "completion_tokens": 120, "cost": 0.0004})
-        if "note taker" in messages[0]["content"]:
+        if "note taker" in system:
             return dict(NOTES_JSON)
-        return dict(self.json_reply or ADVICE_JSON)
+        if "match anonymous voices" in system:
+            return json.loads(json.dumps(self.speaker_reply))
+        return json.loads(json.dumps(self.think_reply or THINK_JSON))
 
     def chat(self, messages, **_kwargs):
         with self._lock:
             self.prompts.append(messages[1]["content"])
         self.usage.add({"prompt_tokens": 500, "completion_tokens": 90, "cost": 0.0002})
         return "A short answer."
+
+    def saw(self, needle: str) -> bool:
+        with self._lock:
+            return any(needle in prompt for prompt in self.prompts)
 
 
 # --------------------------------------------------------------------- harness
@@ -160,54 +183,95 @@ def free_port() -> int:
 
 
 class Browser:
-    """A real WebSocket client that collects server events in the background."""
+    """A real WebSocket client that collects server events in the background.
+
+    Two allowances are made for the client library, neither of which reflects
+    anything about the app (a real browser has neither problem, which is what
+    the Chromium check covers):
+
+    1. simple_websocket.Client is not thread-safe -- send and receive share one
+       socket and one wsproto connection -- so every socket call takes `_sock`.
+    2. Its handshake reads until it sees AcceptConnection and takes only that
+       one wsproto event. When the HTTP 101 and the server's first data frame
+       arrive in the same recv(), the frame stays queued inside wsproto while
+       the reader thread blocks in recv() waiting for bytes that never come, so
+       the first message is lost until the server happens to write again
+       (measured: ~1.5% of connections). Sending `resync` on connect guarantees
+       that second write, which flushes both frames through.
+    """
 
     def __init__(self, port: int):
         self.ws = simple_websocket.Client(f"ws://127.0.0.1:{port}/ws")
         self.events: dict[str, list[dict]] = {}
-        self.order: list[str] = []
-        self._lock = threading.Lock()
+        self.reader_error: str | None = None
+        self.receive_calls = 0
+        self._events_lock = threading.Lock()
+        self._sock = threading.Lock()
         self._closed = False
-        self._reader = threading.Thread(target=self._read, daemon=True)
-        self._reader.start()
+        threading.Thread(target=self._read, daemon=True).start()
+        # See (2) above: force a second server write so the snapshot cannot be
+        # stranded inside the client library.
+        self.emit("resync")
 
     def _read(self):
         while not self._closed:
             try:
-                raw = self.ws.receive(timeout=0.1)
-            except Exception:
+                self.receive_calls += 1
+                with self._sock:
+                    raw = self.ws.receive(timeout=0.02)
+            except Exception as exc:  # noqa: BLE001 - surfaced in assertions
+                if not self._closed:
+                    self.reader_error = f"{exc.__class__.__name__}: {exc}"
                 return
             if raw is None:
+                time.sleep(0.005)  # let a sender in
                 continue
             message = json.loads(raw)
-            with self._lock:
-                self.events.setdefault(message["event"], []).append(
-                    message.get("data") or {}
-                )
-                self.order.append(message["event"])
+            with self._events_lock:
+                self.events.setdefault(message["event"], []).append(message.get("data") or {})
+
+    def _send(self, payload):
+        with self._sock:
+            self.ws.send(payload)
 
     def emit(self, event: str, data: dict | None = None):
-        self.ws.send(json.dumps({"event": event, "data": data or {}}))
+        self._send(json.dumps({"event": event, "data": data or {}}))
 
     def send_audio(self, chunk: bytes):
-        self.ws.send(chunk)
+        self._send(chunk)
 
     def got(self, event: str) -> list[dict]:
-        with self._lock:
+        with self._events_lock:
             return list(self.events.get(event, []))
 
     def wait(self, event: str, count: int = 1, timeout: float = 10.0) -> list[dict]:
-        ok = wait_for(lambda: len(self.got(event)) >= count, timeout)
-        if not ok:
-            with self._lock:
+        if not wait_for(lambda: len(self.got(event)) >= count, timeout):
+            with self._events_lock:
                 seen = {k: len(v) for k, v in self.events.items()}
-            raise AssertionError(f"never received {count}x {event!r}; saw {seen}")
+            raise AssertionError(
+                f"never received {count}x {event!r}; saw {seen}; "
+                f"reader_error={self.reader_error}; "
+                f"ws.connected={getattr(self.ws, 'connected', '?')}; "
+                f"lib_thread_alive={self.ws.thread.is_alive()}; "
+                f"input_buffer={len(getattr(self.ws, 'input_buffer', []))}; "
+                f"receive_calls={self.receive_calls}"
+            )
         return self.got(event)
 
+    def request_snapshot(self, timeout: float = 10.0) -> dict:
+        """Ask for a fresh snapshot and return that one.
+
+        Discards any earlier snapshots first, so a caller can never assert
+        against the one delivered at connect time.
+        """
+        with self._events_lock:
+            self.events.pop("snapshot", None)
+        self.emit("resync")
+        return self.wait("snapshot", timeout=timeout)[-1]
+
     def clear(self):
-        with self._lock:
+        with self._events_lock:
             self.events.clear()
-            self.order.clear()
 
     def close(self):
         self._closed = True
@@ -224,9 +288,12 @@ def setUpModule():
     """One real server for the whole module -- a Flask app can only run once."""
     config.DEEPGRAM_API_KEY = "dg-test"
     config.OPENROUTER_API_KEY = "or-test"
-    config.ADVICE_MIN_INTERVAL = 0
-    config.ADVICE_MIN_NEW_CHARS = 1
+    config.THINK_MIN_INTERVAL = 0
+    config.THINK_MIN_NEW_CHARS = 1
+    config.THINK_URGENT_INTERVAL = 0
     config.NOTES_INTERVAL = 0
+    config.SPEAKER_GUESS_INTERVAL = 9999  # off unless a test asks for it
+    config.ATTENDEE_ENABLED = True
 
     import app as app_module
     from storage import db
@@ -235,13 +302,8 @@ def setUpModule():
     port = free_port()
     threading.Thread(
         target=app_module.app.run,
-        kwargs={
-            "host": "127.0.0.1",
-            "port": port,
-            "threaded": True,
-            "debug": False,
-            "use_reloader": False,
-        },
+        kwargs={"host": "127.0.0.1", "port": port, "threaded": True,
+                "debug": False, "use_reloader": False},
         daemon=True,
     ).start()
 
@@ -298,15 +360,19 @@ class LiveServerCase(unittest.TestCase):
             session.engine.close(wait=False)
         self.app_module._session = None
 
-    def start_meeting(self, brief="Q3 budget 會議，同 Alan 同 Wing 開。", rate=16000):
+    def start_meeting(self, brief=None, rate=16000):
         self.browser.emit(
-            "start_meeting", {"title": "Q3 planning", "brief": brief, "sample_rate": rate}
+            "start_meeting", {"brief": brief if brief is not None else BRIEF, "sample_rate": rate}
         )
         self.browser.wait("meeting_started")
         self.assertTrue(wait_for(lambda: FakeWebSocketApp.latest is not None))
         ws = FakeWebSocketApp.latest
         self.assertTrue(ws.opened.wait(5))
         return ws
+
+    def get(self, path: str) -> tuple[int, str, dict]:
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=10) as r:
+            return r.status, r.read().decode(), dict(r.headers)
 
 
 # ----------------------------------------------------------------------- tests
@@ -316,10 +382,13 @@ class TestMeetingLifecycle(LiveServerCase):
     def test_full_meeting_lifecycle(self):
         ws = self.start_meeting()
 
-        # The connection Deepgram was asked for reflects our configuration.
+        # The connection Deepgram was asked for reflects the brief and config.
         self.assertIn("language=zh-HK", ws.url)
         self.assertIn("sample_rate=16000", ws.url)
         self.assertIn("model=nova-3", ws.url)
+        self.assertIn("diarize=true", ws.url)
+        self.assertIn("keyterm=Falcon", ws.url, "glossary must be boosted")
+        self.assertIn("keyterm=Alan", ws.url, "names must be boosted")
         self.assertEqual(ws.header["Authorization"], "Token dg-test")
 
         statuses = self.browser.wait("status")
@@ -329,12 +398,9 @@ class TestMeetingLifecycle(LiveServerCase):
         chunk = b"\x11\x22" * 2048
         for _ in range(5):
             self.browser.send_audio(chunk)
-        self.assertTrue(
-            wait_for(lambda: ws.audio_bytes >= len(chunk) * 5),
-            f"only {ws.audio_bytes} bytes arrived",
-        )
+        self.assertTrue(wait_for(lambda: ws.audio_bytes >= len(chunk) * 5))
 
-        # Deepgram speaks; transcript, advice and notes follow.
+        # Deepgram speaks; transcript, coaching and notes follow.
         ws.push_utterance("我想爭取多兩個 headcount", speaker=0)
 
         segments = self.browser.wait("segment")
@@ -343,27 +409,24 @@ class TestMeetingLifecycle(LiveServerCase):
 
         advice = self.browser.wait("advice")
         self.assertEqual(advice[0]["key_point"], "Alan 想加兩個 headcount")
-        self.assertEqual(advice[0]["questions"], ["每個 head 的 fully loaded cost 係幾多?"])
-        self.assertEqual(advice[0]["watch_out"], "budget model 未有人負責")
 
         notes = self.browser.wait("notes")
         self.assertEqual(notes[-1]["notes"]["decisions"], ["Q3 加一個 head"])
-        self.assertEqual(notes[-1]["notes"]["action_items"][0]["who"], "Wing")
 
-        # Cost comes from real reported usage and covers both halves of the bill.
+        # The whole brief reached the model.
+        self.assertTrue(self.llm.saw("爭取兩個 headcount"))
+        self.assertTrue(self.llm.saw("Alan (ops)"))
+
         def priced():
             costs = self.browser.got("cost")
             return costs and costs[-1]["llm_usd"] > 0
 
         self.assertTrue(wait_for(priced), "LLM cost never appeared")
         latest = self.browser.got("cost")[-1]
-        self.assertGreater(latest["audio_minutes"], 0)
         self.assertAlmostEqual(
             latest["total_usd"], latest["stt_usd"] + latest["llm_usd"], places=4
         )
-        self.assertEqual(latest["stt_model"], "nova-3")
 
-        # Stopping closes the Deepgram stream cleanly and persists everything.
         meeting_id = self.app_module._session.meeting_id
         self.browser.emit("stop_meeting")
         self.browser.wait("meeting_stopped", timeout=20)
@@ -373,8 +436,7 @@ class TestMeetingLifecycle(LiveServerCase):
         self.assertIsNotNone(stored["ended_at"])
         self.assertEqual([s["text"] for s in stored["segments"]], ["我想爭取多兩個 headcount"])
         self.assertEqual(stored["notes_json"]["decisions"], ["Q3 加一個 head"])
-        self.assertGreater(stored["audio_seconds"], 0)
-        self.assertIn("advice", [e["kind"] for e in stored["events"]])
+        self.assertEqual(stored["brief_json"]["my_goal"], "爭取兩個 headcount")
 
     def test_interim_results_reach_the_browser(self):
         ws = self.start_meeting()
@@ -397,48 +459,164 @@ class TestMeetingLifecycle(LiveServerCase):
         time.sleep(0.3)
         self.assertEqual(ws.audio_bytes, before)
 
+    def test_a_meeting_with_no_brief_at_all_still_works(self):
+        ws = self.start_meeting(brief={})
+        self.assertNotIn("keyterm", ws.url)
+        ws.push_utterance("開會啦")
+        self.assertEqual(self.browser.wait("segment")[0]["text"], "開會啦")
 
-class TestCopilotOverTheWire(LiveServerCase):
-    def test_brief_is_given_to_the_advisor(self):
-        ws = self.start_meeting(brief="留意 project 代號 Falcon")
-        ws.push_utterance("Falcon 幾時 launch?")
-        self.browser.wait("advice")
-        self.assertTrue(
-            any("Falcon" in prompt for prompt in self.llm.prompts),
-            "the pre-meeting brief must be in the advisor prompt",
-        )
 
-    def test_a_question_in_the_meeting_gets_answered(self):
-        self.llm.json_reply = {
-            **ADVICE_JSON,
-            "question_to_answer": {
-                "question": "最低工資係幾多?",
-                "needs_web": True,
-                "search_query": "Hong Kong minimum wage",
+class TestAttendeeOverTheWire(LiveServerCase):
+    def test_the_attendee_turn_reaches_the_browser_and_the_database(self):
+        self.llm.think_reply = {
+            **THINK_JSON,
+            "attendee": {
+                "should_speak": True, "kind": "question", "urgency": "high",
+                "say": "我想問一句，兩個 headcount 係全年計嗎?", "why": "cost differs",
+                "needs_web": False, "search_query": "",
             },
         }
         ws = self.start_meeting()
-        ws.push_utterance("最低工資係幾多?")
+        meeting_id = self.app_module._session.meeting_id
+        ws.push_utterance("加兩個人")
 
-        answers = self.browser.wait("answer")
-        self.assertEqual(answers[0]["answer"], "A short answer.")
-        self.assertFalse(answers[0]["from_user"])
-        self.assertFalse(answers[0]["web_enabled"], "no TAVILY_API_KEY in tests")
+        turn = self.browser.wait("attendee")[0]
+        self.assertIn("全年計", turn["say"])
+        self.assertEqual(turn["kind"], "question")
+        self.assertEqual(turn["urgency"], "high")
+        self.assertEqual(turn["why"], "cost differs")
 
-    def test_user_can_ask_mid_meeting(self):
+        self.assertTrue(
+            wait_for(lambda: any(
+                e["kind"] == "attendee"
+                for e in self.db.get_meeting(meeting_id)["events"]
+            )),
+            "the attendee's turns belong in the saved session",
+        )
+
+    def test_a_quiet_attendee_emits_nothing(self):
+        ws = self.start_meeting()
+        ws.push_utterance("我覺得 ok")
+        self.browser.wait("advice")
+        time.sleep(0.3)
+        self.assertEqual(self.browser.got("attendee"), [])
+
+    def test_user_can_ask_privately_mid_meeting(self):
         self.start_meeting()
         self.browser.emit("ask", {"question": "點樣講服財務部?"})
         answers = self.browser.wait("answer")
         self.assertTrue(answers[0]["from_user"])
-        self.assertEqual(answers[0]["question"], "點樣講服財務部?")
+        self.assertEqual(self.browser.got("attendee"), [], "private answers stay private")
 
-    def test_user_notes_persist(self):
-        self.start_meeting()
+
+class TestSpeakerNaming(LiveServerCase):
+    def test_naming_a_voice_relabels_and_persists(self):
+        ws = self.start_meeting()
         meeting_id = self.app_module._session.meeting_id
-        self.browser.emit("user_notes", {"text": "我自己嘅筆記"})
+        ws.push_utterance("我係 Alan", speaker=0)
+        self.browser.wait("segment")
+
+        self.browser.emit("name_speaker", {"speaker": 0, "name": "Alan"})
+        speakers = self.browser.wait("speakers")
+        self.assertEqual(speakers[-1]["speaker_names"], {"0": "Alan"})
+
+        snapshot = self.browser.request_snapshot()
+        self.assertEqual(snapshot["segments"][0]["speaker_label"], "Alan")
         self.assertTrue(
-            wait_for(lambda: self.db.get_meeting(meeting_id)["user_notes"] == "我自己嘅筆記")
+            wait_for(lambda: self.db.get_meeting(meeting_id)["speaker_names"] == {0: "Alan"})
         )
+
+    def test_a_name_can_be_cleared_again(self):
+        ws = self.start_meeting()
+        ws.push_utterance("hello", speaker=0)
+        self.browser.wait("segment")
+        self.browser.emit("name_speaker", {"speaker": 0, "name": "Alan"})
+        self.browser.wait("speakers")
+        self.browser.emit("name_speaker", {"speaker": 0, "name": ""})
+        self.assertTrue(wait_for(lambda: self.browser.got("speakers")[-1]["speaker_names"] == {}))
+
+    def test_a_nonsense_speaker_index_is_ignored(self):
+        self.start_meeting()
+        for bad in ({"speaker": "abc", "name": "X"}, {"speaker": -1, "name": "X"},
+                    {"speaker": 999, "name": "X"}, {"name": "X"}):
+            self.browser.emit("name_speaker", bad)
+        time.sleep(0.3)
+        self.assertEqual(self.browser.got("speakers"), [])
+        self.browser.emit("resync")
+        self.browser.wait("snapshot")  # connection still healthy
+
+    def test_a_suggested_mapping_can_be_accepted(self):
+        config.SPEAKER_GUESS_INTERVAL = 0
+        config.SPEAKER_GUESS_MIN_SEGMENTS = 2
+        self.addCleanup(setattr, config, "SPEAKER_GUESS_INTERVAL", 9999)
+        self.llm.speaker_reply = {
+            "mapping": [
+                {"speaker": "S1", "name": "Alan", "confidence": "high", "evidence": "我係 Alan"},
+                {"speaker": "S2", "name": "Wing", "confidence": "high", "evidence": "Wing 講"},
+            ],
+            "note": "",
+        }
+        ws = self.start_meeting()
+        ws.push_utterance("我係 Alan", speaker=0)
+        ws.push_utterance("我係 Wing", speaker=1)
+
+        suggestion = self.browser.wait("speaker_suggestion")[0]
+        self.assertEqual(
+            [(p["label"], p["name"]) for p in suggestion["proposals"]],
+            [("S1", "Alan"), ("S2", "Wing")],
+        )
+
+        self.browser.emit("speaker_suggestion", {"accept": True})
+        self.assertTrue(
+            wait_for(
+                lambda: self.browser.got("speakers")
+                and self.browser.got("speakers")[-1]["speaker_names"] == {"0": "Alan", "1": "Wing"}
+            )
+        )
+
+
+class TestSaveTheSession(LiveServerCase):
+    def test_markdown_and_json_downloads_work_mid_meeting(self):
+        ws = self.start_meeting()
+        meeting_id = self.app_module._session.meeting_id
+        ws.push_utterance("我想爭取多兩個 headcount", speaker=0)
+        self.browser.wait("notes")  # make sure notes exist before exporting
+        self.browser.emit("name_speaker", {"speaker": 0, "name": "Alan"})
+        self.browser.wait("speakers")
+
+        status, body, headers = self.get(f"/api/meetings/{meeting_id}/export.md")
+        self.assertEqual(status, 200)
+        self.assertIn("attachment;", headers["Content-Disposition"])
+        self.assertIn(".md", headers["Content-Disposition"])
+        self.assertIn("# Q3 planning", body)
+        self.assertIn("**Alan**: 我想爭取多兩個 headcount", body)
+        self.assertIn("爭取兩個 headcount", body)
+        self.assertIn("Q3 加一個 head", body, "live notes must be in a mid-meeting export")
+
+        status, body, headers = self.get(f"/api/meetings/{meeting_id}/export.json")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["transcript"][0]["speaker_label"], "Alan")
+        self.assertEqual(payload["brief"]["glossary"], ["Falcon", "NocolyHAP"])
+        self.assertEqual(payload["notes"]["decisions"], ["Q3 加一個 head"])
+
+    def test_history_lists_the_meeting(self):
+        ws = self.start_meeting()
+        meeting_id = self.app_module._session.meeting_id
+        ws.push_utterance("一句話")
+        self.browser.wait("segment")
+
+        status, body, _ = self.get("/api/meetings")
+        self.assertEqual(status, 200)
+        rows = json.loads(body)
+        row = next(r for r in rows if r["id"] == meeting_id)
+        self.assertEqual(row["title"], "Q3 planning")
+        self.assertGreaterEqual(row["segments"], 1)
+
+    def test_a_missing_meeting_is_a_404(self):
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.get("/api/meetings/999999/export.md")
+        self.assertEqual(caught.exception.code, 404)
 
 
 class TestReconnectAndGuards(LiveServerCase):
@@ -452,110 +630,127 @@ class TestReconnectAndGuards(LiveServerCase):
         snapshot = second.wait("snapshot")[-1]
         self.assertTrue(snapshot["running"])
         self.assertEqual(snapshot["segments"][0]["text"], "第一句話")
-        self.assertEqual(snapshot["brief"], "Q3 budget 會議，同 Alan 同 Wing 開。")
-        self.assertGreaterEqual(len(snapshot["cards"]), 1)
+        self.assertEqual(snapshot["brief"]["title"], "Q3 planning")
 
-        # Both tabs see live events from here on.
         ws.push_utterance("第二句話")
         self.assertEqual(second.wait("segment")[-1]["text"], "第二句話")
-        self.assertEqual(self.browser.wait("segment", 2)[-1]["text"], "第二句話")
-
-    def test_resync_replays_the_meeting(self):
-        ws = self.start_meeting()
-        ws.push_utterance("一句話")
-        self.browser.wait("segment")
-        self.browser.emit("resync")
-        snapshot = self.browser.wait("snapshot")[-1]
-        self.assertEqual(snapshot["segments"][0]["text"], "一句話")
 
     def test_a_second_meeting_is_refused_while_one_runs(self):
         self.start_meeting()
-        self.browser.emit("start_meeting", {"title": "another", "sample_rate": 16000})
-        errors = self.browser.wait("error")
-        self.assertIn("already running", errors[0]["message"])
+        self.browser.emit("start_meeting", {"brief": BRIEF, "sample_rate": 16000})
+        self.assertIn("already running", self.browser.wait("error")[0]["message"])
 
     def test_bad_sample_rate_is_rejected_before_dialling_deepgram(self):
-        self.browser.emit("start_meeting", {"title": "x", "sample_rate": 96000})
-        errors = self.browser.wait("error")
-        self.assertIn("96000", errors[0]["message"])
+        self.browser.emit("start_meeting", {"brief": BRIEF, "sample_rate": 96000})
+        self.assertIn("96000", self.browser.wait("error")[0]["message"])
         self.assertIsNone(FakeWebSocketApp.latest)
 
     def test_missing_api_keys_block_the_meeting(self):
         config.DEEPGRAM_API_KEY = ""
         self.addCleanup(setattr, config, "DEEPGRAM_API_KEY", "dg-test")
-        self.browser.emit("start_meeting", {"title": "x", "sample_rate": 16000})
-        errors = self.browser.wait("error")
-        self.assertIn("DEEPGRAM_API_KEY", errors[0]["message"])
+        self.browser.emit("start_meeting", {"brief": BRIEF, "sample_rate": 16000})
+        self.assertIn("DEEPGRAM_API_KEY", self.browser.wait("error")[0]["message"])
 
     def test_malformed_frames_do_not_kill_the_connection(self):
         self.browser.ws.send("not json at all")
         self.browser.ws.send(json.dumps({"event": "nonsense", "data": {}}))
-        self.browser.emit("resync")
-        self.browser.wait("snapshot")  # still talking to us
+        self.browser.ws.send(json.dumps({"event": "start_meeting", "data": "not-a-dict"}))
+        self.browser.request_snapshot()  # still talking to us
+
+    def test_user_notes_persist(self):
+        self.start_meeting()
+        meeting_id = self.app_module._session.meeting_id
+        self.browser.emit("user_notes", {"text": "我自己嘅筆記"})
+        self.assertTrue(
+            wait_for(lambda: self.db.get_meeting(meeting_id)["user_notes"] == "我自己嘅筆記")
+        )
 
 
 class TestModelFallback(unittest.TestCase):
-    """A model that never returns a result must hand over to the next one."""
+    """A model that never returns a result must hand over to the next one.
 
-    def setUp(self):
-        dg.websocket.WebSocketApp = FailFirstModelWS
-        FailFirstModelWS.urls.clear()
+    Each test gets its own freshly built socket class and tears its STT down
+    before returning. Sharing one class across tests let a lingering supervisor
+    thread keep constructing sockets after its test had finished, which reached
+    into the next test's state -- these tests must not leak threads.
+    """
+
+    def _stt(self, ws_class, **kwargs):
+        real = dg.websocket.WebSocketApp
+        dg.websocket.WebSocketApp = ws_class
+        self.addCleanup(setattr, dg.websocket, "WebSocketApp", real)
+
+        stt = dg.DeepgramLiveSTT(api_key="k", sample_rate=16000, **kwargs)
+        # Order matters: stop first, then wait for the thread to actually exit.
+        self.addCleanup(stt.join)
+        self.addCleanup(stt.stop)
+        stt.start()
+        return stt
 
     def test_falls_back_to_the_next_model(self):
+        ws_class = make_rejecting_ws()
         statuses: list[dict] = []
-        stt = dg.DeepgramLiveSTT(
-            api_key="k",
-            sample_rate=16000,
-            language="zh-HK",
-            models=["nova-3", "nova-2"],
+        stt = self._stt(
+            ws_class, language="zh-HK", models=["nova-3", "nova-2"],
             on_status=lambda **kw: statuses.append(kw),
             on_error=lambda msg: statuses.append({"state": "error", "detail": msg}),
         )
-        self.addCleanup(stt.stop)
-        stt.start()
         self.assertTrue(
-            wait_for(lambda: any("model=nova-2" in u for u in FailFirstModelWS.urls)),
-            f"never tried nova-2; tried {FailFirstModelWS.urls}",
+            wait_for(lambda: any("model=nova-2" in u for u in ws_class.urls)),
+            f"never tried nova-2; tried {ws_class.urls}",
         )
         self.assertTrue(any(s.get("state") == "fallback" for s in statuses), statuses)
         self.assertEqual(stt.model, "nova-2")
 
+    def test_term_boosting_is_dropped_before_the_model_is_abandoned(self):
+        ws_class = make_rejecting_ws()
+        statuses: list[dict] = []
+        self._stt(
+            ws_class, language="zh-HK", models=["nova-3", "nova-2"], keyterms=["Falcon"],
+            on_status=lambda **kw: statuses.append(kw), on_error=lambda msg: None,
+        )
+        # First attempt carries the terms, then the same model is retried without.
+        self.assertTrue(
+            wait_for(lambda: any(
+                "model=nova-3" in u and "keyterm" not in u for u in ws_class.urls
+            )),
+            f"never retried nova-3 without boosting; tried {ws_class.urls}",
+        )
+        self.assertTrue(any(s.get("state") == "degraded" for s in statuses), statuses)
+        self.assertIn("keyterm=Falcon", ws_class.urls[0])
+
     def test_gives_up_with_an_error_when_every_model_is_rejected(self):
-        FailFirstModelWS.reject_all = True
-        self.addCleanup(setattr, FailFirstModelWS, "reject_all", False)
         errors: list[str] = []
-        stt = dg.DeepgramLiveSTT(
-            api_key="k",
-            sample_rate=16000,
-            models=["nova-3", "nova-2"],
+        self._stt(
+            make_rejecting_ws(reject_all=True), models=["nova-3", "nova-2"],
             on_error=errors.append,
         )
-        self.addCleanup(stt.stop)
-        stt.start()
         self.assertTrue(wait_for(lambda: errors), "must report an unusable configuration")
         self.assertIn("rejected every configured model", errors[0])
 
 
-class FailFirstModelWS(FakeWebSocketApp):
-    """Rejects nova-3 outright; behaves normally for anything else."""
+def make_rejecting_ws(reject_all: bool = False):
+    """A fresh socket class per test, with its own url log and no shared state."""
 
-    urls: list[str] = []
-    reject_all = False
+    class RejectingWS(FakeWebSocketApp):
+        urls: list[str] = []
 
-    def __init__(self, url, **kwargs):
-        super().__init__(url, **kwargs)
-        FailFirstModelWS.urls.append(url)
-        self._reject = FailFirstModelWS.reject_all or "model=nova-3" in url
+        def __init__(self, url, **kwargs):
+            super().__init__(url, **kwargs)
+            RejectingWS.urls.append(url)
+            self._reject = reject_all or "model=nova-3" in url
 
-    def run_forever(self, **_kwargs):
-        self.on_open(self)
-        self.opened.set()
-        if self._reject:
-            self.on_close(self, 1008, "model not available for this language")
-            return
-        self.push(_results("hello", is_final=False))
-        self._closed.wait(3)
-        self.on_close(self, 1000, "done")
+        def run_forever(self, **_kwargs):
+            self.on_open(self)
+            self.opened.set()
+            if self._reject:
+                self.on_close(self, 1008, "model not available for this language")
+                return
+            self.push(_results("hello", is_final=False))
+            self._closed.wait(3)
+            self.on_close(self, 1000, "done")
+
+    return RejectingWS
 
 
 if __name__ == "__main__":

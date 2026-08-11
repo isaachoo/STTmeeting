@@ -61,9 +61,27 @@ COPILOT_OUTPUT_LANGUAGE = os.getenv(
     "COPILOT_OUTPUT_LANGUAGE",
     "Traditional Chinese (Hong Kong), keeping English technical terms in English",
 ).strip()
-ADVICE_MIN_INTERVAL = _float("ADVICE_MIN_INTERVAL", 15)
-ADVICE_MIN_NEW_CHARS = _int("ADVICE_MIN_NEW_CHARS", 120)
+# One "think" cycle produces both the private coaching and the AI attendee's
+# turn, so the two panels never contradict each other and it costs one call.
+THINK_MIN_INTERVAL = _float("THINK_MIN_INTERVAL", _float("ADVICE_MIN_INTERVAL", 15))
+THINK_MIN_NEW_CHARS = _int("THINK_MIN_NEW_CHARS", _int("ADVICE_MIN_NEW_CHARS", 120))
+# When someone in the room just asked a question, think sooner than the normal
+# cadence -- but not instantly, or a fast back-and-forth would spam the model.
+THINK_URGENT_INTERVAL = _float("THINK_URGENT_INTERVAL", 5)
 NOTES_INTERVAL = _float("NOTES_INTERVAL", 90)
+
+# How the AI attendee behaves. "quiet" only answers direct questions, "normal"
+# also raises questions it thinks matter, "active" contributes more freely.
+ATTENDEE_MODE = (os.getenv("ATTENDEE_MODE") or "normal").strip().lower()
+ATTENDEE_ENABLED = _bool("ATTENDEE_ENABLED", True)
+
+# Speaker-name inference: map diarised voices to the attendee roster.
+SPEAKER_GUESS_INTERVAL = _float("SPEAKER_GUESS_INTERVAL", 120)
+SPEAKER_GUESS_MIN_SEGMENTS = _int("SPEAKER_GUESS_MIN_SEGMENTS", 8)
+
+# Boost jargon and names from the brief in the transcriber. Deepgram rejects
+# this parameter on some model/language pairs; the app retries without it.
+DEEPGRAM_KEYTERMS = _bool("DEEPGRAM_KEYTERMS", True)
 
 # How much verbatim transcript the copilot sees; older material is folded into
 # a rolling summary so the prompt stays a predictable size (and cheap).

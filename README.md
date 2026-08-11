@@ -9,16 +9,20 @@ Stop, it writes the final notes.
 
 ```
 ┌─────────────────────────────┬─────────────────────────────┐
-│  Live transcript            │  Copilot                    │
-│  speaker-tagged, streaming  │  key points, questions to   │
-│                             │  ask, answers to questions  │
-│                             │  raised (web search)        │
+│  Live transcript            │  Copilot — private to you   │
+│  one voice per speaker,     │  key points, questions      │
+│  named, streaming           │  worth asking, watch-outs,  │
+│                             │  answers to what you ask    │
 ├─────────────────────────────┼─────────────────────────────┤
-│  Session                    │  Notes                      │
-│  running cost, ask box,     │  decisions, action items,   │
-│  exports, rolling summary   │  open questions + your own  │
+│  AI attendee                │  Notes                      │
+│  speaks up like a           │  decisions, action items,   │
+│  participant: raises        │  open questions, topics,    │
+│  questions, answers the     │  plus your own notes        │
+│  room's, with sources       │                             │
 └─────────────────────────────┴─────────────────────────────┘
 ```
+
+Cost, exports and history live in the **Session** drawer in the title bar.
 
 ## How it works
 
@@ -76,10 +80,11 @@ as one while a bare IP over plain HTTP does not.
 The first Start click raises a microphone permission prompt — allow it, and tick
 "remember" so it does not ask again mid-meeting.
 
-Write a brief before you start — who is in the room, what you want out of the
-meeting, and any jargon or names the transcriber will mangle. Every suggestion
-the copilot makes is conditioned on it, and it is the single biggest lever on
-whether the advice is useful or generic.
+Fill in the brief before you start — the agenda, what you want out of the
+meeting, who is in the room, and the jargon and project names the transcriber
+will mangle. Every suggestion is conditioned on it, and it is the single biggest
+lever on whether the advice is useful or generic. The names also feed speaker
+identification and get boosted in the transcriber.
 
 ## Configuration
 
@@ -93,8 +98,13 @@ knowing about:
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v3.2` | The advisor. Cheap and fast matters more than clever here |
 | `OPENROUTER_NOTES_MODEL` | same as above | Set a stronger model if you want better notes |
 | `TAVILY_API_KEY` | unset | Without it the copilot answers from model knowledge and says so |
-| `ADVICE_MIN_INTERVAL` | `15` | Seconds between advisor calls — the main cost dial |
+| `THINK_MIN_INTERVAL` | `15` | Seconds between think cycles — the main cost dial |
+| `THINK_URGENT_INTERVAL` | `5` | Shorter floor when someone in the room just asked a question |
 | `NOTES_INTERVAL` | `90` | Seconds between note-taking passes |
+| `ATTENDEE_MODE` | `normal` | `quiet` answers direct questions only, `normal` also raises its own, `active` contributes more freely |
+| `ATTENDEE_ENABLED` | `1` | Set to `0` to turn the AI attendee off entirely |
+| `DEEPGRAM_KEYTERMS` | `1` | Boost the glossary and attendee names in the transcriber |
+| `SPEAKER_GUESS_INTERVAL` | `120` | Seconds between attempts to work out which voice is whom |
 | `SAVE_AUDIO` | `0` | Write the raw meeting audio to `data/audio/` for later tuning |
 
 ## What a meeting costs
@@ -112,23 +122,42 @@ Speech-to-text dominates and is fixed by the clock. The LLM side is nearly free,
 and the cost shown in the UI is the real figure OpenRouter reports per call, not
 an estimate from a price table.
 
-Two dials if you want it lower: raise `ADVICE_MIN_INTERVAL`, and keep the brief
-tight — it sits in the prefix of every advisor call.
+Two dials if you want it lower: raise `THINK_MIN_INTERVAL`, and keep the brief
+tight — it sits in the prefix of every call. Note that the coaching panel and the
+AI attendee come out of one LLM call, not two, so switching the attendee off
+saves nothing.
 
 ## Design notes
 
-**Cost per advisor call stays flat.** The transcript grows all meeting but the
+**One call, two outputs.** The private coaching and the AI attendee's turn come
+from a single think cycle. That halves the cost against running them separately
+and means the two panels can never contradict each other.
+
+**Cost per think cycle stays flat.** The transcript grows all meeting but the
 prompt does not: recent speech goes in verbatim and older material is folded
 into a rolling summary. Hour four costs the same per call as minute ten.
 
 **The copilot never blocks transcription.** Every LLM call runs on a worker
-thread, and at most one of each kind (advice, notes, summary) is ever in flight.
-A slow model response throttles the copilot instead of building a backlog that
-lands all at once ten minutes later.
+thread, and at most one of each kind (think, notes, summary, speakers) is ever in
+flight. A slow model response throttles the copilot instead of building a backlog
+that lands all at once ten minutes later.
 
-**Advice is rate-limited by new speech, not just by the clock.** Silence costs
-nothing, and the advisor is shown what it already told you so it does not
-restate the same point in new words.
+**Thinking is rate-limited by new speech, not just by the clock.** Silence costs
+nothing. When someone asks a question the floor drops to `THINK_URGENT_INTERVAL`
+so the attendee can answer while the room is still waiting — but it never goes to
+zero, or a fast back-and-forth would spam the model.
+
+**Repetition is guarded twice.** The prompts are shown what has already been
+advised and already said out loud, and a near-duplicate attendee turn is dropped
+server-side even if the model produces one. A participant that says the same
+sentence three times is the worst failure this panel has.
+
+**Speaker names are suggested, never assumed.** Diarisation separates the voices;
+the copilot proposes which voice is which person from self-introductions and
+names used in the room, and you accept with one click. It will not rename a voice
+on its own, will not invent a name that is not on your roster, and will not
+contradict a name you set — a wrong name you trust is worse than an unnamed
+voice.
 
 **Transcription errors are expected.** Cantonese mixed with English is the hard
 case for any STT. The prompts tell the model to read through homophone errors
@@ -141,14 +170,17 @@ transcript quality.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-60 tests, no network and no API keys needed.
+122 tests, no network and no API keys needed.
 
 `test_offline.py` covers the parts that fail silently in a live meeting: JSON
 coercion around model output, the rate limiting that decides when the copilot
-thinks, the rolling-summary window, the Deepgram message parser, and the cost
-arithmetic. `test_socket_flow.py` boots the real server on a real port and drives
-it over a real WebSocket the way the browser does — binary audio frames in,
-transcript and advice out — with Deepgram and OpenRouter faked.
+thinks, the attendee's speak-or-stay-quiet handling and its repeat guard, speaker
+naming, the rolling-summary window, the Deepgram message parser and keyterm
+fallback, the exports, and the cost arithmetic.
+
+`test_socket_flow.py` boots the real server on a real port and drives it over a
+real WebSocket the way the browser does — binary audio frames in, transcript,
+coaching, attendee turns and exports out — with Deepgram and OpenRouter faked.
 
 ## Limits worth being honest about
 
@@ -159,6 +191,13 @@ transcript and advice out — with Deepgram and OpenRouter faked.
 - **One meeting at a time, one user.** This is a local tool, not a server.
 - **In-person meetings.** The browser mic captures the room. Capturing a Zoom or
   Teams call needs a system-audio loopback device, which is not wired up here.
+- **Diarisation splits voices, it does not recognise people.** Deepgram groups the
+  audio by voice; nothing enrolls a voiceprint, so the names come from you or
+  from an accepted suggestion. Expect it to merge two similar voices or split one
+  person across two tags occasionally, especially with a far-away mic.
+- **Speaking aloud is off by default.** The attendee panel can read a turn out
+  through your speakers, but the microphone will hear it and transcribe it as
+  meeting content. Useful for a quick test, awkward in a real room.
 - **A refreshed tab stops sending audio.** The meeting keeps running on the
   server and the page repaints from it, but the microphone belonged to the old
   page. The status bar says so when it happens; stop and restart to resume

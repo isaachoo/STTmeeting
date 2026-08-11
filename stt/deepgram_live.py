@@ -34,6 +34,8 @@ DEEPGRAM_URL = "wss://api.deepgram.com/v1/listen"
 MAX_QUEUED_CHUNKS = 400
 KEEPALIVE_IDLE_SECONDS = 5.0
 MAX_CONSECUTIVE_FAILURES = 6
+# Deepgram caps boosted terms; well beyond what a meeting glossary needs.
+MAX_KEYTERMS = 100
 
 
 class DeepgramLiveSTT(STTEngine):
@@ -45,6 +47,7 @@ class DeepgramLiveSTT(STTEngine):
         models: list[str] | None = None,
         channels: int = 1,
         diarize: bool = True,
+        keyterms: list[str] | None = None,
         on_interim=None,
         on_utterance=None,
         on_status=None,
@@ -56,6 +59,11 @@ class DeepgramLiveSTT(STTEngine):
         self.models = list(models or ["nova-3", "nova-2"])
         self.channels = channels
         self.diarize = diarize
+        # Jargon and names from the brief. Boosting is not supported on every
+        # model/language pair, so it is the first thing dropped when a
+        # connection is rejected -- see _run_supervisor.
+        self.keyterms = [t for t in (keyterms or []) if t.strip()][:MAX_KEYTERMS]
+        self._use_keyterms = bool(self.keyterms)
 
         self._on_interim = on_interim or (lambda text: None)
         self._on_utterance = on_utterance or (lambda utt: None)
@@ -65,6 +73,7 @@ class DeepgramLiveSTT(STTEngine):
         self._audio: queue.Queue[bytes | None] = queue.Queue(maxsize=MAX_QUEUED_CHUNKS)
         self._stopping = threading.Event()
         self._supervisor: threading.Thread | None = None
+        self._ws = None  # the live connection, so stop() can shut it immediately
 
         self._model_index = 0
         self._proven = False  # current model has returned at least one result
@@ -110,10 +119,23 @@ class DeepgramLiveSTT(STTEngine):
             return
         self._stopping.set()
         try:
-            self._audio.put_nowait(None)  # wakes the sender loop
+            self._audio.put_nowait(None)  # wakes the sender loop, sends CloseStream
         except queue.Full:
             pass
         self._flush_pending(reason="stop")
+        # Close from this side too, so the supervisor thread winds down promptly
+        # instead of waiting on a server that may never close first.
+        ws = self._ws
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def join(self, timeout: float = 5.0) -> None:
+        """Wait for the connection thread to finish. Used by tests."""
+        if self._supervisor is not None:
+            self._supervisor.join(timeout)
 
     @property
     def audio_seconds(self) -> float:
@@ -127,6 +149,15 @@ class DeepgramLiveSTT(STTEngine):
     # ------------------------------------------------------------- connection
 
     def _url(self) -> str:
+        params: list[tuple[str, str]] = list(self._base_params().items())
+        if self._use_keyterms and self.keyterms:
+            # nova-3 calls it keyterm, earlier models call it keywords. Both take
+            # the parameter repeated once per term.
+            name = "keyterm" if self.model.startswith("nova-3") else "keywords"
+            params.extend((name, term) for term in self.keyterms)
+        return f"{DEEPGRAM_URL}?{urllib.parse.urlencode(params)}"
+
+    def _base_params(self) -> dict:
         params = {
             "model": self.model,
             "language": self.language,
@@ -144,7 +175,7 @@ class DeepgramLiveSTT(STTEngine):
         }
         if self.diarize:
             params["diarize"] = "true"
-        return f"{DEEPGRAM_URL}?{urllib.parse.urlencode(params)}"
+        return params
 
     def _run_supervisor(self) -> None:
         failures = 0
@@ -172,11 +203,27 @@ class DeepgramLiveSTT(STTEngine):
                     break
                 continue
 
-            # Never produced a result: most likely this model rejects the
-            # language. Try the next candidate.
+            # Never produced a result, so the connection itself was refused.
+            # Drop the optional extras before giving up on the model: term
+            # boosting is not supported on every model/language pair, and
+            # losing it is far better than losing transcription.
+            if self._use_keyterms and self.keyterms:
+                self._use_keyterms = False
+                self._on_status(
+                    state="degraded",
+                    detail=(
+                        f"{self.model} would not accept term boosting "
+                        f"({close_info}); retrying without it"
+                    ),
+                )
+                failures = 0
+                continue
+
             if self._model_index + 1 < len(self.models):
                 rejected = self.model
                 self._model_index += 1
+                # A different model may well accept boosting, so offer it again.
+                self._use_keyterms = bool(self.keyterms)
                 self._on_status(
                     state="fallback",
                     detail=(
@@ -234,12 +281,14 @@ class DeepgramLiveSTT(STTEngine):
             on_error=on_error,
             on_close=on_close,
         )
+        self._ws = ws
         try:
             ws.run_forever(ping_interval=20, ping_timeout=10)
         except Exception as exc:  # noqa: BLE001 - surfaced via close_reason
             close_reason.append(str(exc))
         finally:
             connection_closed.set()
+            self._ws = None
 
         return "; ".join(r for r in close_reason if r) or "closed without a reason"
 

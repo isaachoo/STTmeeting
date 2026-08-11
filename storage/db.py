@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_meeting ON events(meeting_id, id);
 """
 
+# Columns added after the first release. Applied on every init so an existing
+# database from an earlier version keeps working instead of erroring.
+MIGRATIONS = {
+    "brief_json": "ALTER TABLE meetings ADD COLUMN brief_json TEXT NOT NULL DEFAULT '{}'",
+    "speakers_json": "ALTER TABLE meetings ADD COLUMN speakers_json TEXT NOT NULL DEFAULT '{}'",
+}
+
 
 def _connect() -> sqlite3.Connection:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -60,14 +67,28 @@ def _connect() -> sqlite3.Connection:
 def init() -> None:
     with _connect() as conn:
         conn.executescript(SCHEMA)
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(meetings)")}
+        for column, statement in MIGRATIONS.items():
+            if column not in existing:
+                conn.execute(statement)
 
 
-def create_meeting(title: str, brief: str, language: str, stt_model: str) -> int:
+def create_meeting(
+    title: str, brief: dict, language: str, stt_model: str
+) -> int:
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO meetings (title, brief, started_at, language, stt_model)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (title, brief, time.time(), language, stt_model),
+            "INSERT INTO meetings (title, brief, brief_json, started_at, language,"
+            " stt_model) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                title,
+                # A plain-text copy so the row is readable without unpacking JSON.
+                (brief or {}).get("context", ""),
+                json.dumps(brief or {}, ensure_ascii=False),
+                time.time(),
+                language,
+                stt_model,
+            ),
         )
         return int(cur.lastrowid)
 
@@ -89,26 +110,29 @@ def add_event(meeting_id: int, kind: str, payload: dict) -> None:
         )
 
 
-def save_notes(meeting_id: int, notes: dict) -> None:
+def _set(meeting_id: int, column: str, value) -> None:
     with _connect() as conn:
-        conn.execute(
-            "UPDATE meetings SET notes_json = ? WHERE id = ?",
-            (json.dumps(notes, ensure_ascii=False), meeting_id),
-        )
+        conn.execute(f"UPDATE meetings SET {column} = ? WHERE id = ?", (value, meeting_id))
+
+
+def save_notes(meeting_id: int, notes: dict) -> None:
+    _set(meeting_id, "notes_json", json.dumps(notes, ensure_ascii=False))
 
 
 def save_user_notes(meeting_id: int, text: str) -> None:
-    with _connect() as conn:
-        conn.execute(
-            "UPDATE meetings SET user_notes = ? WHERE id = ?", (text, meeting_id)
-        )
+    _set(meeting_id, "user_notes", text)
 
 
 def save_summary(meeting_id: int, summary: str) -> None:
-    with _connect() as conn:
-        conn.execute(
-            "UPDATE meetings SET summary = ? WHERE id = ?", (summary, meeting_id)
-        )
+    _set(meeting_id, "summary", summary)
+
+
+def save_speakers(meeting_id: int, speaker_names: dict) -> None:
+    _set(
+        meeting_id,
+        "speakers_json",
+        json.dumps({str(k): v for k, v in speaker_names.items()}, ensure_ascii=False),
+    )
 
 
 def finish_meeting(
@@ -131,18 +155,25 @@ def finish_meeting(
 def list_meetings(limit: int = 50) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT id, title, brief, started_at, ended_at, audio_seconds, usage_json"
-            " FROM meetings ORDER BY id DESC LIMIT ?",
+            "SELECT m.id, m.title, m.started_at, m.ended_at, m.audio_seconds,"
+            " m.usage_json, m.brief_json,"
+            " (SELECT COUNT(*) FROM segments s WHERE s.meeting_id = m.id) AS segments"
+            " FROM meetings m ORDER BY m.id DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return [dict(r) for r in rows]
+
+    meetings = []
+    for row in rows:
+        meeting = dict(row)
+        meeting["usage_json"] = _json(meeting.get("usage_json"))
+        meeting["brief_json"] = _json(meeting.get("brief_json"))
+        meetings.append(meeting)
+    return meetings
 
 
 def get_meeting(meeting_id: int) -> dict | None:
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM meetings WHERE id = ?", (meeting_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
         if not row:
             return None
         meeting = dict(row)
@@ -155,15 +186,26 @@ def get_meeting(meeting_id: int) -> dict | None:
             ).fetchall()
         ]
         meeting["events"] = [
-            {**dict(r), "payload": json.loads(r["payload"])}
+            {"at": r["at"], "kind": r["kind"], "payload": _json(r["payload"])}
             for r in conn.execute(
                 "SELECT at, kind, payload FROM events WHERE meeting_id = ? ORDER BY id",
                 (meeting_id,),
             ).fetchall()
         ]
-    for key in ("notes_json", "usage_json"):
-        try:
-            meeting[key] = json.loads(meeting.get(key) or "{}")
-        except ValueError:
-            meeting[key] = {}
+
+    for key in ("notes_json", "usage_json", "brief_json", "speakers_json"):
+        meeting[key] = _json(meeting.get(key))
+    # JSON object keys are strings; diarisation speakers are ints.
+    meeting["speaker_names"] = {
+        int(k): v for k, v in (meeting.get("speakers_json") or {}).items() if str(k).isdigit()
+    }
     return meeting
+
+
+def _json(raw):
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw or "{}")
+    except (ValueError, TypeError):
+        return {}

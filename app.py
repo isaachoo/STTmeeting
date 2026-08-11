@@ -21,13 +21,14 @@ import logging
 import queue
 import threading
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, Response, jsonify, render_template
 from flask_sock import Sock
 from simple_websocket import ConnectionClosed
 
 import config
+from copilot.brief import Brief
 from session import MeetingSession
-from storage import db
+from storage import db, export
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +38,13 @@ log = logging.getLogger("app")
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = config.SECRET_KEY
-app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25}
+# No ping_interval on purpose. simple_websocket sends its keepalive PING from
+# its own background reader thread, while this app sends events from the
+# connection's handler thread. Both go through one wsproto connection and one
+# stateful permessage-deflate compressor, so two writers corrupt the frame
+# stream and the browser's socket dies -- once every ping interval, at random.
+# Leaving pings off makes the handler thread the only writer. Nothing is lost:
+# the meeting generates constant traffic, and the client reconnects by itself.
 sock = Sock(app)
 
 POLL_SECONDS = 0.02  # inbound poll interval; also the outbound flush cadence
@@ -47,6 +54,31 @@ OUTBOUND_MAX = 500  # per client; a wedged browser must not grow memory here
 # frames touch the session without it, keeping the hot path free of contention.
 _session: MeetingSession | None = None
 _session_lock = threading.Lock()
+
+
+class _CompleteWrites:
+    """Socket wrapper that guarantees every write finishes.
+
+    simple_websocket writes with `sock.send(data)` and ignores the return value,
+    but `send` is allowed to write fewer bytes than it was given. That would
+    truncate a WebSocket frame on the wire and leave the browser waiting forever
+    for the rest of a message it will never get. Small frames on a blocking
+    socket rarely under-write, so this is hardening rather than a fix for an
+    observed failure -- but a five-hour meeting sends a lot of frames, and
+    `sendall` loops until the buffer is gone.
+    """
+
+    __slots__ = ("_sock",)
+
+    def __init__(self, sock):
+        self._sock = sock
+
+    def send(self, data, *args, **kwargs):
+        self._sock.sendall(data, *args, **kwargs)
+        return len(data)
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
 
 
 class Client:
@@ -72,6 +104,9 @@ class Client:
             self.dropped += 1
 
     def flush(self) -> None:
+        """Write queued messages. Only ever called from this client's own
+        thread -- see the note on ping_interval above; a second writer on one
+        WebSocket corrupts the stream."""
         while True:
             try:
                 message = self.out.get_nowait()
@@ -103,6 +138,8 @@ def index():
         language=config.DEEPGRAM_LANGUAGE,
         models=", ".join(config.DEEPGRAM_MODELS),
         web_search=bool(config.TAVILY_API_KEY),
+        attendee_enabled=config.ATTENDEE_ENABLED,
+        attendee_mode=config.ATTENDEE_MODE,
     )
 
 
@@ -135,11 +172,51 @@ def meeting_detail(meeting_id: int):
     return jsonify(meeting)
 
 
+@app.get("/api/meetings/<int:meeting_id>/export.md")
+def meeting_markdown(meeting_id: int):
+    return _download(meeting_id, export.to_markdown, "md", "text/markdown")
+
+
+@app.get("/api/meetings/<int:meeting_id>/export.json")
+def meeting_json(meeting_id: int):
+    return _download(meeting_id, export.to_json, "json", "application/json")
+
+
+def _download(meeting_id: int, render, suffix: str, mimetype: str):
+    """Save-everything download. Works for a meeting that is still running --
+    the transcript so far is already in the database."""
+    meeting = db.get_meeting(meeting_id)
+    if meeting is None:
+        return jsonify({"error": "not found"}), 404
+
+    # A running meeting has not written its final notes yet, so take the live
+    # ones; otherwise the download would be missing the last few minutes.
+    session = _session
+    if session is not None and session.meeting_id == meeting_id and not session.stopped:
+        with session.state.lock:
+            meeting["notes_json"] = dict(session.state.notes)
+            meeting["user_notes"] = session.state.user_notes
+            meeting["summary"] = session.state.rolling_summary
+            meeting["speaker_names"] = dict(session.state.speaker_names)
+        meeting["audio_seconds"] = session.stt.audio_seconds
+        meeting["usage_json"] = session.llm.usage.snapshot()
+        meeting["stt_model"] = session.stt.model
+
+    body = render(meeting)
+    name = f"{export.filename_stem(meeting)}.{suffix}"
+    return Response(
+        body,
+        mimetype=mimetype,
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
 # -------------------------------------------------------------------- websocket
 
 
 @sock.route("/ws")
 def ws_route(ws):
+    ws.sock = _CompleteWrites(ws.sock)
     client = Client(ws)
     with _clients_lock:
         _clients.add(client)
@@ -156,7 +233,9 @@ def ws_route(ws):
                 _handle_audio(bytes(frame))
             else:
                 _handle_event(client, frame)
-    except ConnectionClosed:
+    except (ConnectionClosed, OSError):
+        # A closed tab shows up as ConnectionClosed, or as a broken pipe / reset
+        # if it goes away mid-send. Both are normal, not worth a traceback.
         pass
     except Exception:
         log.exception("websocket handler failed")
@@ -182,10 +261,18 @@ def _handle_event(client: Client, raw: str) -> None:
     try:
         message = json.loads(raw)
         event = message.get("event")
-        data = message.get("data") or {}
+        data = message.get("data")
     except (ValueError, AttributeError):
         log.warning("ignoring malformed frame: %.120s", raw)
         return
+
+    # `data` must be an object. A client that sends a string or a list gets its
+    # frame ignored -- every handler below assumes .get() works.
+    if not isinstance(data, dict):
+        if data is not None:
+            log.warning("ignoring %r frame with non-object data", event)
+            return
+        data = {}
 
     if event == "start_meeting":
         _start_meeting(client, data)
@@ -199,10 +286,28 @@ def _handle_event(client: Client, raw: str) -> None:
     elif event == "user_notes":
         if _session is not None:
             _session.set_user_notes((data.get("text") or "")[:100_000])
+    elif event == "name_speaker":
+        _name_speaker(data)
+    elif event == "speaker_suggestion":
+        if _session is not None:
+            _session.apply_speaker_suggestion(bool(data.get("accept")))
     elif event == "resync":
         client.send("snapshot", _snapshot())
     else:
         log.warning("unknown event %r", event)
+
+
+def _name_speaker(data: dict) -> None:
+    session = _session
+    if session is None:
+        return
+    try:
+        speaker = int(data.get("speaker"))
+    except (TypeError, ValueError):
+        return
+    if not 0 <= speaker <= 64:
+        return
+    session.set_speaker_name(speaker, str(data.get("name") or ""))
 
 
 def _start_meeting(client: Client, data: dict) -> None:
@@ -219,8 +324,7 @@ def _start_meeting(client: Client, data: dict) -> None:
             return
         try:
             session = MeetingSession(
-                title=(data.get("title") or "").strip()[:200],
-                brief=(data.get("brief") or "").strip()[:8000],
+                brief=Brief.from_payload(data.get("brief")),
                 sample_rate=data.get("sample_rate"),
                 emit=_broadcast,
             )

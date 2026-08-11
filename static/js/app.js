@@ -86,33 +86,61 @@ const ui = {
   connDot: el('conn-dot'),
   statusText: el('status-text'),
   elapsed: el('elapsed'),
+  costTotal: el('cost-total'),
+  btnSession: el('btn-session'),
   btnStart: el('btn-start'),
   btnStop: el('btn-stop'),
+  drawer: el('drawer'),
+
   setup: el('setup'),
   inTitle: el('in-title'),
-  inBrief: el('in-brief'),
+  inAgenda: el('in-agenda'),
+  inGoal: el('in-goal'),
+  inContext: el('in-context'),
+  inGlossary: el('in-glossary'),
   inMicMode: el('in-mic-mode'),
+  attendees: el('attendees'),
+  btnAddAttendee: el('btn-add-attendee'),
+
   transcript: el('transcript'),
   interim: el('interim'),
   autoscroll: el('chk-autoscroll'),
+  speakerChips: el('speaker-chips'),
+  suggestion: el('speaker-suggestion'),
+
   advice: el('advice'),
+  askForm: el('ask-form'),
+  inAsk: el('in-ask'),
+
+  attendee: el('attendee'),
+  chkSpeak: el('chk-speak'),
+
   notes: el('notes'),
   notesUpdated: el('notes-updated'),
   userNotes: el('user-notes'),
   notesSaveHint: el('notes-save-hint'),
+
   summary: el('summary'),
   log: el('log'),
-  sttModel: el('stt-model'),
-  askForm: el('ask-form'),
-  inAsk: el('in-ask'),
-  costTotal: el('cost-total'),
-  costStt: el('cost-stt'),
-  costLlm: el('cost-llm'),
-  statAudio: el('stat-audio'),
-  statCalls: el('stat-calls'),
-  statTokens: el('stat-tokens'),
-  btnDlTranscript: el('btn-dl-transcript'),
-  btnDlNotes: el('btn-dl-notes'),
+  history: el('history'),
+  btnRefreshHistory: el('btn-refresh-history'),
+  btnSaveMd: el('btn-save-md'),
+  btnSaveJson: el('btn-save-json'),
+  audioNote: el('audio-note'),
+
+  dCostTotal: el('d-cost-total'),
+  dCostStt: el('d-cost-stt'),
+  dCostLlm: el('d-cost-llm'),
+  dStatAudio: el('d-stat-audio'),
+  dStatCalls: el('d-stat-calls'),
+  dStatTokens: el('d-stat-tokens'),
+
+  popover: el('name-popover'),
+  popLabel: el('pop-label'),
+  popRoster: el('pop-roster'),
+  popForm: el('pop-form'),
+  popName: el('pop-name'),
+  popClear: el('pop-clear'),
 };
 
 let audioContext = null;
@@ -121,40 +149,67 @@ let workletNode = null;
 let streaming = false;
 let running = false;
 let startedAtMs = null;
-let latestNotes = null;
+let meetingId = null;
+let speakerNames = {}; // diarisation index (as string) -> name
+let knownSpeakers = new Set();
+let rosterNames = []; // from the pre-meeting attendee list
+let popoverSpeaker = null;
 
 // ------------------------------------------------------------------ utilities
 
 function log(message, isError = false) {
   const line = document.createElement('div');
   if (isError) line.className = 'err';
-  const t = new Date().toLocaleTimeString();
-  line.textContent = `${t}  ${message}`;
+  line.textContent = `${new Date().toLocaleTimeString()}  ${message}`;
   ui.log.prepend(line);
   while (ui.log.childElementCount > 100) ui.log.lastElementChild.remove();
 }
 
 function clockFromSeconds(total) {
   const s = Math.max(0, Math.floor(total));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
   const pad = (n) => String(n).padStart(2, '0');
-  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+  const h = Math.floor(s / 3600);
+  return h > 0
+    ? `${h}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`
+    : `${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
 }
 
 function usd(value) {
   return `$${Number(value || 0).toFixed(4)}`;
 }
 
-function download(filename, text) {
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+function timeOf(payload) {
+  return new Date((payload.at || Date.now() / 1000) * 1000).toLocaleTimeString();
+}
+
+function clearIfEmpty(container) {
+  const placeholder = container.querySelector('.empty');
+  if (placeholder) placeholder.remove();
+}
+
+function trim(container, max = 60) {
+  while (container.childElementCount > max) container.lastElementChild.remove();
+}
+
+function labelFor(speaker) {
+  if (speaker === null || speaker === undefined) return '?';
+  return speakerNames[String(speaker)] || `S${speaker + 1}`;
+}
+
+function copyButton(text, label = 'Copy') {
+  const button = document.createElement('button');
+  button.className = 'ghost small';
+  button.textContent = label;
+  button.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      button.textContent = 'Copied ✓';
+      setTimeout(() => { button.textContent = label; }, 1200);
+    } catch {
+      log('clipboard is not available in this browser', true);
+    }
+  });
+  return button;
 }
 
 setInterval(() => {
@@ -162,6 +217,92 @@ setInterval(() => {
     ui.elapsed.textContent = clockFromSeconds((Date.now() - startedAtMs) / 1000);
   }
 }, 500);
+
+// ------------------------------------------------------- pre-meeting attendees
+
+function addAttendeeRow(person = {}) {
+  const index = ui.attendees.childElementCount;
+  const row = document.createElement('div');
+  row.className = 'attendee-row';
+
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.placeholder = 'Name';
+  name.id = `attendee-name-${index}`;
+  name.value = person.name || '';
+  name.className = 'a-name';
+
+  const role = document.createElement('input');
+  role.type = 'text';
+  role.placeholder = 'Role (optional)';
+  role.value = person.role || '';
+  role.className = 'a-role';
+
+  const meWrap = document.createElement('label');
+  meWrap.className = 'me-toggle';
+  const me = document.createElement('input');
+  me.type = 'checkbox';
+  me.className = 'a-me';
+  me.checked = !!person.is_me;
+  // Exactly one person is the user.
+  me.addEventListener('change', () => {
+    if (!me.checked) return;
+    ui.attendees.querySelectorAll('.a-me').forEach((other) => {
+      if (other !== me) other.checked = false;
+    });
+  });
+  meWrap.append(me, document.createTextNode('me'));
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'ghost drop';
+  remove.textContent = '×';
+  remove.title = 'Remove';
+  remove.addEventListener('click', () => row.remove());
+
+  row.append(name, role, meWrap, remove);
+  ui.attendees.append(row);
+  return row;
+}
+
+ui.btnAddAttendee.addEventListener('click', () => addAttendeeRow().querySelector('.a-name').focus());
+
+function collectBrief() {
+  const attendees = [...ui.attendees.querySelectorAll('.attendee-row')]
+    .map((row) => ({
+      name: row.querySelector('.a-name').value.trim(),
+      role: row.querySelector('.a-role').value.trim(),
+      is_me: row.querySelector('.a-me').checked,
+    }))
+    .filter((person) => person.name);
+
+  rosterNames = attendees.map((person) => person.name);
+
+  return {
+    title: ui.inTitle.value.trim(),
+    agenda: ui.inAgenda.value.trim(),
+    my_goal: ui.inGoal.value.trim(),
+    context: ui.inContext.value.trim(),
+    attendees,
+    glossary: ui.inGlossary.value
+      .split(/[,\n]/)
+      .map((term) => term.trim())
+      .filter(Boolean),
+  };
+}
+
+function fillBrief(brief) {
+  if (!brief) return;
+  ui.inTitle.value = brief.title || '';
+  ui.inAgenda.value = brief.agenda || '';
+  ui.inGoal.value = brief.my_goal || '';
+  ui.inContext.value = brief.context || '';
+  ui.inGlossary.value = (brief.glossary || []).join(', ');
+  ui.attendees.innerHTML = '';
+  (brief.attendees || []).forEach(addAttendeeRow);
+  rosterNames = (brief.attendees || []).map((person) => person.name);
+  if (!ui.attendees.childElementCount) addAttendeeRow();
+}
 
 // --------------------------------------------------------------- microphone
 
@@ -171,7 +312,8 @@ async function startCapture() {
     audio: {
       channelCount: 1,
       // Room mode hands Deepgram the untouched signal, which is usually better
-      // when the mic is picking up several people across a table.
+      // when the mic is picking up several people across a table -- noise
+      // suppression tends to eat the quieter, further-away voices.
       echoCancellation: false,
       noiseSuppression: !roomMode,
       autoGainControl: true,
@@ -225,13 +367,10 @@ ui.btnStart.addEventListener('click', async () => {
   ui.btnStart.disabled = true;
   ui.statusText.textContent = 'asking for the microphone…';
   try {
+    const brief = collectBrief();
     const sampleRate = await startCapture();
     log(`microphone open at ${sampleRate} Hz`);
-    socket.emit('start_meeting', {
-      title: ui.inTitle.value,
-      brief: ui.inBrief.value,
-      sample_rate: sampleRate,
-    });
+    socket.emit('start_meeting', { brief, sample_rate: sampleRate });
   } catch (err) {
     stopCapture();
     ui.btnStart.disabled = false;
@@ -243,8 +382,13 @@ ui.btnStart.addEventListener('click', async () => {
 ui.btnStop.addEventListener('click', () => {
   ui.btnStop.disabled = true;
   stopCapture();
-  socket.emit('stop_meeting', {});
+  socket.emit('stop_meeting');
   ui.statusText.textContent = 'wrapping up…';
+});
+
+ui.btnSession.addEventListener('click', () => {
+  ui.drawer.hidden = !ui.drawer.hidden;
+  if (!ui.drawer.hidden) loadHistory();
 });
 
 ui.askForm.addEventListener('submit', (event) => {
@@ -266,27 +410,184 @@ ui.userNotes.addEventListener('input', () => {
   }, 800);
 });
 
-ui.btnDlTranscript.addEventListener('click', () => {
-  const lines = [...ui.transcript.querySelectorAll('.line')].map((line) => {
-    const who = line.querySelector('.who')?.textContent ?? '?';
-    const at = line.querySelector('.at')?.textContent ?? '';
-    return `[${at}] ${who}: ${line.querySelector('.said').textContent}`;
+function saveSession(suffix) {
+  if (!meetingId) {
+    log('no meeting to save yet', true);
+    return;
+  }
+  // A plain navigation: the server sets Content-Disposition, the browser saves.
+  window.location = `/api/meetings/${meetingId}/export.${suffix}`;
+}
+
+ui.btnSaveMd.addEventListener('click', () => saveSession('md'));
+ui.btnSaveJson.addEventListener('click', () => saveSession('json'));
+ui.btnRefreshHistory.addEventListener('click', loadHistory);
+
+async function loadHistory() {
+  try {
+    const response = await fetch('/api/meetings');
+    const meetings = await response.json();
+    ui.history.innerHTML = '';
+    if (!meetings.length) {
+      ui.history.innerHTML = '<p class="muted small">Nothing saved yet.</p>';
+      return;
+    }
+    meetings.forEach((meeting) => {
+      const row = document.createElement('div');
+      row.className = 'history-row';
+
+      const left = document.createElement('div');
+      const title = document.createElement('div');
+      title.textContent = meeting.title || `Meeting ${meeting.id}`;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const when = meeting.started_at
+        ? new Date(meeting.started_at * 1000).toLocaleString()
+        : '';
+      const mins = ((meeting.audio_seconds || 0) / 60).toFixed(0);
+      meta.textContent = `${when} · ${mins} min · ${meeting.segments || 0} lines`;
+      left.append(title, meta);
+
+      const links = document.createElement('div');
+      ['md', 'json'].forEach((suffix) => {
+        const link = document.createElement('a');
+        link.href = `/api/meetings/${meeting.id}/export.${suffix}`;
+        link.textContent = suffix.toUpperCase();
+        link.style.marginLeft = '8px';
+        links.append(link);
+      });
+
+      row.append(left, links);
+      ui.history.append(row);
+    });
+  } catch (err) {
+    log(`could not load history: ${err.message}`, true);
+  }
+}
+
+// ------------------------------------------------------- speaker names
+
+function renderSpeakerChips() {
+  ui.speakerChips.innerHTML = '';
+  [...knownSpeakers].sort((a, b) => a - b).forEach((speaker) => {
+    const named = speakerNames[String(speaker)];
+    const chip = document.createElement('button');
+    chip.className = `chip-speaker s${speaker % 4}${named ? '' : ' unnamed'}`;
+    chip.textContent = named || `S${speaker + 1} — name?`;
+    chip.title = 'Click to name this voice';
+    chip.addEventListener('click', (event) => openPopover(speaker, event.currentTarget));
+    ui.speakerChips.append(chip);
   });
-  if (!lines.length) return log('nothing to download yet');
-  download(`transcript-${Date.now()}.txt`, lines.join('\n'));
+}
+
+function relabelTranscript() {
+  ui.transcript.querySelectorAll('.line').forEach((line) => {
+    const speaker = line.dataset.speaker;
+    if (speaker === '' || speaker === undefined) return;
+    const who = line.querySelector('.who');
+    if (who) who.textContent = labelFor(Number(speaker));
+  });
+}
+
+function openPopover(speaker, anchor) {
+  popoverSpeaker = speaker;
+  ui.popLabel.textContent = `S${speaker + 1}`;
+  ui.popName.value = speakerNames[String(speaker)] || '';
+
+  // Offer the roster first: one click is the common case.
+  ui.popRoster.innerHTML = '';
+  const used = new Set(Object.values(speakerNames));
+  rosterNames.forEach((name) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ghost small';
+    button.textContent = name;
+    if (used.has(name) && speakerNames[String(speaker)] !== name) {
+      button.title = 'already assigned to another voice';
+      button.style.opacity = '0.5';
+    }
+    button.addEventListener('click', () => nameSpeaker(speaker, name));
+    ui.popRoster.append(button);
+  });
+
+  const box = anchor.getBoundingClientRect();
+  ui.popover.hidden = false;
+  const width = ui.popover.offsetWidth || 250;
+  ui.popover.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - width - 8))}px`;
+  ui.popover.style.top = `${box.bottom + window.scrollY + 6}px`;
+  ui.popName.focus();
+}
+
+function closePopover() {
+  ui.popover.hidden = true;
+  popoverSpeaker = null;
+}
+
+function nameSpeaker(speaker, name) {
+  socket.emit('name_speaker', { speaker, name });
+  closePopover();
+}
+
+ui.popForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  if (popoverSpeaker === null) return;
+  nameSpeaker(popoverSpeaker, ui.popName.value.trim());
 });
 
-ui.btnDlNotes.addEventListener('click', () => {
-  if (!latestNotes) return log('no notes yet');
-  download(`notes-${Date.now()}.md`, notesToMarkdown(latestNotes, ui.userNotes.value));
+ui.popClear.addEventListener('click', () => {
+  if (popoverSpeaker !== null) nameSpeaker(popoverSpeaker, '');
 });
+
+document.addEventListener('click', (event) => {
+  if (ui.popover.hidden) return;
+  if (ui.popover.contains(event.target)) return;
+  if (event.target.classList && event.target.classList.contains('chip-speaker')) return;
+  closePopover();
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closePopover();
+});
+
+function renderSuggestion(suggestion) {
+  if (!suggestion || !(suggestion.proposals || []).length) {
+    ui.suggestion.hidden = true;
+    return;
+  }
+  ui.suggestion.innerHTML = '';
+
+  const heading = document.createElement('div');
+  heading.innerHTML = '<strong>The copilot thinks it knows who is who.</strong>';
+  const list = document.createElement('ul');
+  suggestion.proposals.forEach((proposal) => {
+    const item = document.createElement('li');
+    item.textContent = `${proposal.label} is ${proposal.name} (${proposal.confidence} confidence)`;
+    if (proposal.evidence) {
+      const evidence = document.createElement('span');
+      evidence.className = 'ev';
+      evidence.textContent = ` — "${proposal.evidence}"`;
+      item.append(evidence);
+    }
+    list.append(item);
+  });
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const accept = document.createElement('button');
+  accept.className = 'primary small';
+  accept.textContent = 'Use these names';
+  accept.addEventListener('click', () => socket.emit('speaker_suggestion', { accept: true }));
+  const dismiss = document.createElement('button');
+  dismiss.className = 'ghost small';
+  dismiss.textContent = 'No thanks';
+  dismiss.addEventListener('click', () => socket.emit('speaker_suggestion', { accept: false }));
+  actions.append(accept, dismiss);
+
+  ui.suggestion.append(heading, list, actions);
+  ui.suggestion.hidden = false;
+}
 
 // ------------------------------------------------------------------ rendering
-
-function clearIfEmpty(container) {
-  const placeholder = container.querySelector('.empty');
-  if (placeholder) placeholder.remove();
-}
 
 function addSegment(seg) {
   clearIfEmpty(ui.transcript);
@@ -295,10 +596,11 @@ function addSegment(seg) {
 
   const line = document.createElement('p');
   line.className = 'line';
+  line.dataset.speaker = seg.speaker === null || seg.speaker === undefined ? '' : seg.speaker;
 
   const who = document.createElement('span');
   who.className = `who${seg.speaker !== null && seg.speaker !== undefined ? ` s${seg.speaker % 4}` : ''}`;
-  who.textContent = seg.speaker_label || '?';
+  who.textContent = seg.speaker_label || labelFor(seg.speaker);
 
   const said = document.createElement('span');
   said.className = 'said';
@@ -311,23 +613,14 @@ function addSegment(seg) {
   line.append(who, said, at);
   ui.transcript.append(line);
 
+  if (seg.speaker !== null && seg.speaker !== undefined && !knownSpeakers.has(seg.speaker)) {
+    knownSpeakers.add(seg.speaker);
+    renderSpeakerChips();
+  }
+
   if (ui.autoscroll.checked && nearBottom) {
     ui.transcript.scrollTop = ui.transcript.scrollHeight;
   }
-}
-
-function copyOnClick(node, text) {
-  node.title = 'click to copy';
-  node.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-      const original = node.textContent;
-      node.textContent = `${original}  ✓ copied`;
-      setTimeout(() => { node.textContent = original; }, 1200);
-    } catch {
-      log('clipboard is not available in this browser', true);
-    }
-  });
 }
 
 function addAdviceCard(payload) {
@@ -337,7 +630,7 @@ function addAdviceCard(payload) {
 
   const time = document.createElement('span');
   time.className = 'card-time';
-  time.textContent = new Date((payload.at || Date.now() / 1000) * 1000).toLocaleTimeString();
+  time.textContent = timeOf(payload);
   card.append(time);
 
   if (payload.key_point) {
@@ -352,14 +645,24 @@ function addAdviceCard(payload) {
     watch.textContent = payload.watch_out;
     card.append(watch);
   }
-  if (payload.questions && payload.questions.length) {
+  if ((payload.questions || []).length) {
     const heading = document.createElement('h4');
     heading.textContent = 'You could ask';
     const list = document.createElement('ul');
-    payload.questions.forEach((q) => {
+    payload.questions.forEach((question) => {
       const item = document.createElement('li');
-      item.textContent = q;
-      copyOnClick(item, q);
+      item.textContent = question;
+      item.title = 'click to copy';
+      item.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(question);
+          const original = item.textContent;
+          item.textContent = `${original}  ✓ copied`;
+          setTimeout(() => { item.textContent = original; }, 1200);
+        } catch {
+          log('clipboard is not available in this browser', true);
+        }
+      });
       list.append(item);
     });
     card.append(heading, list);
@@ -371,14 +674,14 @@ function addAdviceCard(payload) {
 function addAnswerCard(payload) {
   clearIfEmpty(ui.advice);
   const card = document.createElement('div');
-  card.className = `card answer${payload.from_user ? ' mine' : ''}`;
+  card.className = 'card answer mine';
 
   const time = document.createElement('span');
   time.className = 'card-time';
-  time.textContent = new Date((payload.at || Date.now() / 1000) * 1000).toLocaleTimeString();
+  time.textContent = timeOf(payload);
 
   const heading = document.createElement('h4');
-  heading.textContent = payload.from_user ? 'You asked' : 'Answer to a question raised';
+  heading.textContent = 'You asked';
 
   const question = document.createElement('p');
   question.className = 'q';
@@ -389,8 +692,13 @@ function addAnswerCard(payload) {
   answer.textContent = payload.answer;
 
   card.append(time, heading, question, answer);
+  card.append(sourceList(payload));
+  ui.advice.prepend(card);
+  trim(ui.advice);
+}
 
-  if (payload.sources && payload.sources.length) {
+function sourceList(payload) {
+  if ((payload.sources || []).length) {
     const list = document.createElement('ul');
     list.className = 'sources';
     payload.sources.forEach((source, i) => {
@@ -403,34 +711,94 @@ function addAnswerCard(payload) {
       item.append(link);
       list.append(item);
     });
-    card.append(list);
-  } else {
-    const flag = document.createElement('p');
-    flag.className = 'flag';
-    flag.textContent = payload.web_enabled
-      ? 'no web results — answered from model knowledge'
-      : 'web search is off — answered from model knowledge';
-    card.append(flag);
+    return list;
   }
-
-  ui.advice.prepend(card);
-  trim(ui.advice);
+  const flag = document.createElement('p');
+  flag.className = 'flag';
+  flag.textContent = payload.web_enabled
+    ? 'no web results — from model knowledge'
+    : 'web search off — from model knowledge';
+  return flag;
 }
 
-function trim(container, max = 60) {
-  while (container.childElementCount > max) container.lastElementChild.remove();
+const KIND_LABELS = {
+  answer: 'answering the room',
+  question: 'wants to ask',
+  clarification: 'wants to clarify',
+  challenge: 'pushing back',
+  info: 'adding information',
+};
+
+function addAttendeeTurn(payload) {
+  clearIfEmpty(ui.attendee);
+  const turn = document.createElement('div');
+  turn.className = `turn${payload.urgency === 'high' ? ' high' : ''}`;
+
+  const head = document.createElement('div');
+  head.className = 'turn-head';
+  const kind = document.createElement('span');
+  kind.className = 'turn-kind';
+  kind.textContent = KIND_LABELS[payload.kind] || payload.kind || 'says';
+  const time = document.createElement('span');
+  time.className = 'turn-time';
+  time.textContent = timeOf(payload);
+  head.append(kind, time);
+
+  const say = document.createElement('p');
+  say.className = 'say';
+  say.textContent = payload.say;
+
+  turn.append(head, say);
+
+  if (payload.why) {
+    const why = document.createElement('p');
+    why.className = 'why';
+    why.textContent = payload.why;
+    turn.append(why);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'turn-actions';
+  actions.append(copyButton(payload.say, 'Copy'));
+  if (window.speechSynthesis) {
+    const speakButton = document.createElement('button');
+    speakButton.className = 'ghost small';
+    speakButton.textContent = 'Speak';
+    speakButton.addEventListener('click', () => speak(payload.say, true));
+    actions.append(speakButton);
+  }
+  turn.append(actions);
+
+  if (payload.kind === 'answer' || (payload.sources || []).length) {
+    turn.append(sourceList(payload));
+  }
+
+  ui.attendee.prepend(turn);
+  trim(ui.attendee, 40);
+  speak(payload.say);
+}
+
+function speak(text, force = false) {
+  if (!window.speechSynthesis || !text) return;
+  if (!force && !ui.chkSpeak.checked) return;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'zh-HK';
+  const voice = speechSynthesis
+    .getVoices()
+    .find((v) => (v.lang || '').toLowerCase().startsWith('zh-hk'));
+  if (voice) utterance.voice = voice;
+  speechSynthesis.speak(utterance);
 }
 
 function renderNotes(notes) {
-  latestNotes = notes;
   ui.notes.innerHTML = '';
 
   const hasAnything =
     notes.summary ||
-    notes.decisions?.length ||
-    notes.action_items?.length ||
-    notes.open_questions?.length ||
-    notes.topics?.length;
+    (notes.decisions || []).length ||
+    (notes.action_items || []).length ||
+    (notes.open_questions || []).length ||
+    (notes.topics || []).length;
 
   if (!hasAnything) {
     ui.notes.innerHTML = '<p class="empty">Nothing worth noting yet.</p>';
@@ -462,7 +830,7 @@ function renderNotes(notes) {
 
   listSection('Decisions', notes.decisions);
 
-  if (notes.action_items?.length) {
+  if ((notes.action_items || []).length) {
     const section = document.createElement('div');
     section.className = 'notes-section';
     const h = document.createElement('h4');
@@ -488,7 +856,7 @@ function renderNotes(notes) {
 
   listSection('Open questions', notes.open_questions);
 
-  if (notes.topics?.length) {
+  if ((notes.topics || []).length) {
     const section = document.createElement('div');
     section.className = 'notes-section';
     const h = document.createElement('h4');
@@ -506,36 +874,14 @@ function renderNotes(notes) {
   ui.notesUpdated.textContent = `updated ${new Date().toLocaleTimeString()}`;
 }
 
-function notesToMarkdown(notes, userNotes) {
-  const out = ['# Meeting notes', ''];
-  if (notes.summary) out.push('## Summary', notes.summary, '');
-  if (notes.decisions?.length) {
-    out.push('## Decisions', ...notes.decisions.map((d) => `- ${d}`), '');
-  }
-  if (notes.action_items?.length) {
-    out.push('## Action items');
-    notes.action_items.forEach((item) => {
-      const due = item.due ? ` — due ${item.due}` : '';
-      out.push(`- **${item.who || 'unassigned'}**: ${item.what}${due}`);
-    });
-    out.push('');
-  }
-  if (notes.open_questions?.length) {
-    out.push('## Open questions', ...notes.open_questions.map((q) => `- ${q}`), '');
-  }
-  if (notes.topics?.length) out.push('## Topics', notes.topics.join(', '), '');
-  if (userNotes?.trim()) out.push('## My notes', userNotes.trim(), '');
-  return out.join('\n');
-}
-
 function renderCost(cost) {
   ui.costTotal.textContent = usd(cost.total_usd);
-  ui.costStt.textContent = usd(cost.stt_usd);
-  ui.costLlm.textContent = usd(cost.llm_usd);
-  ui.statAudio.textContent = `${Number(cost.audio_minutes || 0).toFixed(2)} min`;
-  ui.statCalls.textContent = cost.llm_calls ?? 0;
-  ui.statTokens.textContent = `${cost.prompt_tokens ?? 0} / ${cost.completion_tokens ?? 0}`;
-  if (cost.stt_model) ui.sttModel.textContent = cost.stt_model;
+  ui.dCostTotal.textContent = usd(cost.total_usd);
+  ui.dCostStt.textContent = usd(cost.stt_usd);
+  ui.dCostLlm.textContent = usd(cost.llm_usd);
+  ui.dStatAudio.textContent = `${Number(cost.audio_minutes || 0).toFixed(2)} min`;
+  ui.dStatCalls.textContent = cost.llm_calls ?? 0;
+  ui.dStatTokens.textContent = `${cost.prompt_tokens ?? 0} / ${cost.completion_tokens ?? 0}`;
 }
 
 function setRunning(isRunning) {
@@ -564,24 +910,43 @@ socket.on('__close', () => {
 socket.on('snapshot', (snap) => {
   if (!snap || !snap.meeting_id) {
     setRunning(false);
+    if (!ui.attendees.childElementCount) addAttendeeRow();
     return;
   }
   // Arrives on a fresh page load and on every socket reconnect. Repaint from
   // the server's state either way; whether we are still capturing depends on
   // whether this page still owns the microphone, decided below.
+  meetingId = snap.meeting_id;
+  speakerNames = snap.speaker_names || {};
+  knownSpeakers = new Set();
+  fillBrief(snap.brief);
+
   ui.transcript.innerHTML = '';
   (snap.segments || []).forEach(addSegment);
-  if (!snap.segments?.length) {
+  if (!(snap.segments || []).length) {
     ui.transcript.innerHTML = '<p class="empty">Nothing transcribed yet.</p>';
   }
+  renderSpeakerChips();
+  renderSuggestion(snap.speaker_suggestion);
+
   ui.advice.innerHTML = '';
   (snap.cards || []).forEach((card) => {
     if (card.kind === 'answer') addAnswerCard(card);
     else addAdviceCard(card);
   });
-  if (!snap.cards?.length) {
+  if (!(snap.cards || []).length) {
     ui.advice.innerHTML = '<p class="empty">No suggestions yet.</p>';
   }
+
+  ui.attendee.innerHTML = '';
+  const speakWas = ui.chkSpeak.checked;
+  ui.chkSpeak.checked = false; // replaying history must not read it all aloud
+  (snap.attendee_turns || []).forEach(addAttendeeTurn);
+  ui.chkSpeak.checked = speakWas;
+  if (!(snap.attendee_turns || []).length) {
+    ui.attendee.innerHTML = '<p class="empty">Nothing to say yet.</p>';
+  }
+
   if (snap.notes) renderNotes(snap.notes);
   if (snap.user_notes) ui.userNotes.value = snap.user_notes;
   if (snap.summary) ui.summary.textContent = snap.summary;
@@ -589,8 +954,6 @@ socket.on('snapshot', (snap) => {
     renderCost(snap.cost);
     startedAtMs = Date.now() - (snap.cost.elapsed_seconds || 0) * 1000;
   }
-  ui.inTitle.value = snap.title || '';
-  ui.inBrief.value = snap.brief || '';
 
   if (snap.running) {
     // setRunning resumes streaming only if the worklet is still alive, which
@@ -614,10 +977,16 @@ socket.on('snapshot', (snap) => {
 
 socket.on('meeting_started', (snap) => {
   setRunning(true);
+  meetingId = snap.meeting_id;
   startedAtMs = Date.now();
+  speakerNames = {};
+  knownSpeakers = new Set();
+  renderSpeakerChips();
   ui.transcript.innerHTML = '<p class="empty">Listening…</p>';
   ui.advice.innerHTML = '<p class="empty">No suggestions yet.</p>';
+  ui.attendee.innerHTML = '<p class="empty">Nothing to say yet.</p>';
   ui.notes.innerHTML = '<p class="empty">Nothing worth noting yet.</p>';
+  ui.suggestion.hidden = true;
   log(`meeting ${snap.meeting_id} started`);
 });
 
@@ -628,7 +997,8 @@ socket.on('meeting_stopped', (payload) => {
   ui.statusText.textContent = 'finished';
   ui.interim.textContent = '';
   if (payload.notes) renderNotes(payload.notes);
-  log(`meeting ${payload.meeting_id} finished and saved`);
+  log(`meeting ${payload.meeting_id} finished and saved — Session ▸ Download to keep it`);
+  loadHistory();
 });
 
 socket.on('status', (status) => {
@@ -650,10 +1020,20 @@ socket.on('interim', (payload) => {
 socket.on('segment', addSegment);
 socket.on('advice', addAdviceCard);
 socket.on('answer', addAnswerCard);
+socket.on('attendee', addAttendeeTurn);
 socket.on('notes', (payload) => renderNotes(payload.notes || {}));
 socket.on('summary', (payload) => { ui.summary.textContent = payload.summary || ''; });
 socket.on('cost', renderCost);
 socket.on('usage', () => {});
+
+socket.on('speakers', (payload) => {
+  speakerNames = payload.speaker_names || {};
+  renderSpeakerChips();
+  relabelTranscript();
+});
+
+socket.on('speaker_suggestion', renderSuggestion);
+socket.on('speaker_suggestion_cleared', () => { ui.suggestion.hidden = true; });
 
 socket.on('copilot_error', (payload) => {
   log(`copilot (${payload.where}): ${payload.message}`, true);
@@ -669,3 +1049,6 @@ socket.on('error', (payload) => {
 window.addEventListener('beforeunload', () => {
   if (running) stopCapture();
 });
+
+// Start with one empty attendee row so the field is obviously fillable.
+addAttendeeRow();

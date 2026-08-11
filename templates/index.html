@@ -20,6 +20,8 @@
   <div class="bar-right">
     <span id="status-text" class="muted small">idle</span>
     <span id="elapsed" class="mono small">00:00</span>
+    <span id="cost-total" class="mono small cost-pill" title="estimated cost so far">$0.0000</span>
+    <button id="btn-session" class="ghost small">Session</button>
     <button id="btn-start" class="primary">Start meeting</button>
     <button id="btn-stop" class="danger" hidden>Stop</button>
   </div>
@@ -32,26 +34,104 @@
 </div>
 {% endif %}
 
-<!-- Pre-meeting setup: the brief is what makes the advice specific. -->
+<!-- Slide-down drawer: cost detail, saving the session, history, log. -->
+<section id="drawer" class="drawer" hidden>
+  <div class="drawer-grid">
+
+    <div class="drawer-col">
+      <h3 class="sub">Save this session</h3>
+      <p class="muted small">
+        Everything: brief, full transcript with speaker names, notes, every
+        copilot suggestion and answer with its sources, and the cost.
+      </p>
+      <div class="exports">
+        <button id="btn-save-md" class="ghost">Download Markdown</button>
+        <button id="btn-save-json" class="ghost">Download JSON</button>
+      </div>
+      <p class="muted small" id="audio-note" hidden>
+        Raw audio is also being written to <code>data/audio/</code>.
+      </p>
+
+      <h3 class="sub">Cost</h3>
+      <dl class="stats">
+        <div><dt>Total</dt><dd class="mono big" id="d-cost-total">$0.0000</dd></div>
+        <div><dt>Speech to text</dt><dd class="mono" id="d-cost-stt">$0.0000</dd></div>
+        <div><dt>LLM</dt><dd class="mono" id="d-cost-llm">$0.0000</dd></div>
+        <div><dt>Audio sent</dt><dd class="mono" id="d-stat-audio">0.00 min</dd></div>
+        <div><dt>LLM calls</dt><dd class="mono" id="d-stat-calls">0</dd></div>
+        <div><dt>Tokens in / out</dt><dd class="mono" id="d-stat-tokens">0 / 0</dd></div>
+      </dl>
+    </div>
+
+    <div class="drawer-col">
+      <h3 class="sub">Rolling summary <span class="muted small">(what the copilot is working from)</span></h3>
+      <p class="muted small" id="summary">Builds up once the meeting has some length to it.</p>
+
+      <h3 class="sub">Log</h3>
+      <div class="log" id="log"></div>
+    </div>
+
+    <div class="drawer-col">
+      <h3 class="sub">Past meetings</h3>
+      <button id="btn-refresh-history" class="ghost small">Refresh</button>
+      <div class="history" id="history"><p class="muted small">Nothing saved yet.</p></div>
+    </div>
+
+  </div>
+</section>
+
+<!-- Pre-meeting setup. The more that goes in here, the more specific the advice. -->
 <section id="setup" class="setup">
+  <div class="setup-head">
+    <h2>Before you start</h2>
+    <span class="muted small">Everything here is optional, and every field makes the copilot sharper.</span>
+  </div>
+
   <div class="setup-grid">
-    <label>
+    <label class="span2">
       Meeting title
-      <input id="in-title" type="text" placeholder="e.g. Q3 planning with the ops team">
+      <input id="in-title" type="text" placeholder="Q3 planning with the ops team">
     </label>
     <label>
       Microphone
       <select id="in-mic-mode">
-        <option value="voice" selected>Voice (noise suppression on)</option>
-        <option value="room">Room (raw mic, nothing filtered)</option>
+        <option value="room" selected>Room — several people at a table</option>
+        <option value="voice">Voice — mostly me, noise suppression on</option>
       </select>
     </label>
   </div>
-  <label class="brief-label">
-    Brief &mdash; who is in the room, what you want out of it, jargon and names the
-    transcriber will mangle. The copilot reads this before every suggestion.
-    <textarea id="in-brief" rows="4" placeholder="同事 Alan、Wing 同財務部開會，討論 Q3 budget。我想爭取多兩個 headcount。留意 project 代號 Falcon、系統名 NocolyHAP。"></textarea>
-  </label>
+
+  <div class="setup-grid">
+    <label>
+      Agenda
+      <textarea id="in-agenda" rows="3" placeholder="1. Q3 budget&#10;2. Headcount&#10;3. Falcon timeline"></textarea>
+    </label>
+    <label>
+      What I want out of this meeting
+      <textarea id="in-goal" rows="3" placeholder="爭取多兩個 headcount，同財務部 agree 一個 number"></textarea>
+    </label>
+    <label>
+      Background the copilot should know
+      <textarea id="in-context" rows="3" placeholder="上次會議財務部話要等 Q4。Falcon 已經 delay 兩次。"></textarea>
+    </label>
+  </div>
+
+  <div class="setup-grid">
+    <div class="field span2">
+      <label for="attendee-name-0">
+        Who is in the room
+        <span class="muted small">— names let the copilot say "Alan asked…" instead of "S2 asked…"</span>
+      </label>
+      <div id="attendees"></div>
+      <button id="btn-add-attendee" type="button" class="ghost small">+ Add person</button>
+    </div>
+
+    <label>
+      Jargon, names, project codes
+      <span class="muted small">— comma separated; boosted in the transcriber</span>
+      <textarea id="in-glossary" rows="3" placeholder="Falcon, NocolyHAP, headcount, fully loaded cost, KPI"></textarea>
+    </label>
+  </div>
 </section>
 
 <main class="grid">
@@ -60,8 +140,12 @@
   <section class="panel" id="panel-transcript">
     <div class="panel-head">
       <h2>Live transcript</h2>
-      <label class="toggle small"><input type="checkbox" id="chk-autoscroll" checked> follow</label>
+      <div class="head-right">
+        <span id="speaker-chips" class="chips"></span>
+        <label class="toggle small"><input type="checkbox" id="chk-autoscroll" checked> follow</label>
+      </div>
     </div>
+    <div id="speaker-suggestion" class="suggestion" hidden></div>
     <div class="panel-body" id="transcript">
       <p class="empty">Transcript appears here once the meeting starts.</p>
     </div>
@@ -71,47 +155,40 @@
   <!-- top right -->
   <section class="panel" id="panel-advice">
     <div class="panel-head">
-      <h2>Copilot</h2>
+      <h2>Copilot <span class="muted small">— private to you</span></h2>
       <span class="muted small">
-        {% if web_search %}web search on{% else %}web search off &mdash; set TAVILY_API_KEY{% endif %}
+        {% if web_search %}web search on{% else %}web search off — set TAVILY_API_KEY{% endif %}
       </span>
     </div>
     <div class="panel-body" id="advice">
-      <p class="empty">Key points, questions to ask, and answers to questions raised will appear here.</p>
+      <p class="empty">Key points, questions worth asking, and things to watch out for appear here.</p>
     </div>
+    <form id="ask-form" class="ask">
+      <input id="in-ask" type="text" placeholder="Ask the copilot privately, mid-meeting…" autocomplete="off">
+      <button type="submit">Ask</button>
+    </form>
   </section>
 
   <!-- bottom left -->
-  <section class="panel" id="panel-session">
+  <section class="panel" id="panel-attendee">
     <div class="panel-head">
-      <h2>Session</h2>
-      <span class="muted small" id="stt-model"></span>
-    </div>
-    <div class="panel-body">
-      <form id="ask-form" class="ask">
-        <input id="in-ask" type="text" placeholder="Ask the copilot anything, mid-meeting…" autocomplete="off">
-        <button type="submit">Ask</button>
-      </form>
-
-      <dl class="stats">
-        <div><dt>Estimated cost</dt><dd class="mono big" id="cost-total">$0.0000</dd></div>
-        <div><dt>Speech to text</dt><dd class="mono" id="cost-stt">$0.0000</dd></div>
-        <div><dt>LLM</dt><dd class="mono" id="cost-llm">$0.0000</dd></div>
-        <div><dt>Audio sent</dt><dd class="mono" id="stat-audio">0.00 min</dd></div>
-        <div><dt>LLM calls</dt><dd class="mono" id="stat-calls">0</dd></div>
-        <div><dt>Tokens in / out</dt><dd class="mono" id="stat-tokens">0 / 0</dd></div>
-      </dl>
-
-      <div class="exports">
-        <button id="btn-dl-transcript" class="ghost">Download transcript</button>
-        <button id="btn-dl-notes" class="ghost">Download notes</button>
+      <h2>AI attendee <span class="muted small">— what it wants to say</span></h2>
+      <div class="head-right">
+        <label class="toggle small" title="Read turns aloud through your speakers. The microphone will hear it.">
+          <input type="checkbox" id="chk-speak"> speak aloud
+        </label>
       </div>
-
-      <h3 class="sub">Rolling summary</h3>
-      <p class="muted small" id="summary">Builds up once the meeting has some length to it.</p>
-
-      <h3 class="sub">Log</h3>
-      <div class="log" id="log"></div>
+    </div>
+    <div class="panel-body" id="attendee">
+      {% if attendee_enabled %}
+      <p class="empty">
+        It listens like a participant and speaks up when it has something worth
+        saying — answering a question the room has left hanging, or raising one
+        nobody has asked. Mode: <strong>{{ attendee_mode }}</strong>.
+      </p>
+      {% else %}
+      <p class="empty">The AI attendee is switched off. Set <code>ATTENDEE_ENABLED=1</code> in <code>.env</code>.</p>
+      {% endif %}
     </div>
   </section>
 
@@ -126,12 +203,23 @@
         <p class="empty">Decisions, action items and open questions are collected as you go.</p>
       </div>
       <h3 class="sub">My notes <span class="muted small">(yours; the copilot never edits this)</span></h3>
-      <textarea id="user-notes" rows="6" placeholder="Type anything you want to keep…"></textarea>
+      <textarea id="user-notes" rows="5" placeholder="Type anything you want to keep…"></textarea>
       <div class="save-hint muted small" id="notes-save-hint"></div>
     </div>
   </section>
 
 </main>
+
+<!-- Popover for naming a voice. Moved next to whichever chip was clicked. -->
+<div id="name-popover" class="popover" hidden>
+  <div class="popover-title">Who is <span id="pop-label"></span>?</div>
+  <div id="pop-roster" class="pop-roster"></div>
+  <form id="pop-form">
+    <input id="pop-name" type="text" placeholder="or type a name" autocomplete="off">
+    <button type="submit" class="primary small">Set</button>
+  </form>
+  <button id="pop-clear" class="ghost small">Clear name</button>
+</div>
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
