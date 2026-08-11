@@ -41,6 +41,25 @@ SQLite as the meeting happens — a refresh at hour four loses nothing.
 
 ## Setup
 
+### Windows
+
+Double-click **`run.bat`**. On the first run it builds the virtual environment,
+installs the dependencies, and opens `.env` in Notepad for your API keys; run it
+again once those are saved.
+
+Or by hand, in PowerShell:
+
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+copy .env.example .env    # then fill in DEEPGRAM_API_KEY and OPENROUTER_API_KEY
+.venv\Scripts\python app.py
+```
+
+Needs Python 3.10 or newer, installed with "Add python.exe to PATH" ticked.
+
+### macOS / Linux
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
@@ -48,9 +67,14 @@ cp .env.example .env      # then fill in DEEPGRAM_API_KEY and OPENROUTER_API_KEY
 .venv/bin/python app.py
 ```
 
-Open <http://127.0.0.1:5000>. Use `127.0.0.1`, not a LAN IP: browsers only grant
-microphone access on a secure origin, and `localhost` counts as one while a bare
-IP over plain HTTP does not.
+### Then
+
+Open <http://127.0.0.1:5000> in Chrome or Edge. Use `127.0.0.1`, not a LAN IP:
+browsers only grant microphone access on a secure origin, and `localhost` counts
+as one while a bare IP over plain HTTP does not.
+
+The first Start click raises a microphone permission prompt — allow it, and tick
+"remember" so it does not ask again mid-meeting.
 
 Write a brief before you start — who is in the room, what you want out of the
 meeting, and any jargon or names the transcriber will mangle. Every suggestion

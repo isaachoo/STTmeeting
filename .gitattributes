@@ -1,0 +1,8 @@
+# cmd.exe mishandles labels and goto in a batch file with LF endings, so the
+# Windows launcher must always be checked out with CRLF.
+*.bat text eol=crlf
+
+* text=auto eol=lf
+*.png binary
+*.wav binary
+*.sqlite3 binary
