@@ -15,9 +15,11 @@ straightforward, which carry real risk, and which need a decision from you first
 | 6 | Change the speaker on one line | Medium | 4–6 h | none |
 | 7 | Filter by speaker | Easy | 2 h | none |
 | 8 | Teams / Zoom meetings | Medium–hard | 1–2 days | platform limits |
+| 9 | Local offline STT (sherpa-onnx) | Medium | 1–2.5 days | accuracy unknown |
 
 Everything here is possible. Item 5 is the one that changes the app's shape; item 8
-is the one with constraints outside our control.
+is the one with constraints outside our control; **item 9 is the one I would do
+first**, for reasons set out below.
 
 ---
 
@@ -234,6 +236,100 @@ person speaks into their own headset instead of one mic across a table.
 
 ---
 
+## 9. Local offline STT with sherpa-onnx — Medium, and the most interesting
+
+**Verdict: very feasible, and the right model for your languages exists. This changes
+the economics and the privacy story of the whole app.**
+
+### The model is a genuinely good fit
+
+`sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en` is a **streaming**
+Paraformer supporting **Mandarin + Cantonese + English**, converted from a
+Cantonese-specific ModelScope model. That is precisely the mix you speak.
+
+Worth dwelling on why this could beat Deepgram for you: Deepgram's `zh-HK` leans
+heavily on formal written Chinese, which is why it converts 搞掂 to 搞定. A model
+trained from Cantonese sources may keep 口語 as 口語. **That is a hypothesis, not a
+fact** — but it is the first option on this list with a real mechanism for fixing
+your slang problem rather than working around it.
+
+### What it changes
+
+| | Deepgram today | sherpa-onnx local |
+|---|---|---|
+| STT cost per 5-hour meeting | ~$2.31 | **$0** |
+| Total per 5-hour meeting | ~$3–4 | **~$1** (LLM only) |
+| Audio leaves your machine | yes | **no** |
+| Works without internet | no | **yes** (STT half) |
+| Hardware | none | CPU only, no GPU |
+| Latency | 200–400 ms | comparable on a modern CPU |
+
+Two consequences worth naming. **STT becomes free**, so the dominant cost in the app
+disappears and a five-hour meeting drops to roughly a dollar. And the README's claim
+about privacy stops being a hedge — the audio genuinely never leaves the laptop, only
+the transcript goes to OpenRouter. For a confidential meeting that is a real change
+in what the tool is.
+
+### The three gaps, honestly
+
+**1. No speaker diarization.** This is the significant one. sherpa-onnx's diarization
+API is offline — it processes a finished file, not a live stream. Your app separates
+four people live, so something has to replace it.
+
+The good news is that the replacement is arguably **better** than what you have.
+sherpa-onnx ships speaker embedding extractors (3D-Speaker), which enables
+**speaker enrollment**: each person says one sentence at the start, we store a
+voiceprint, and every utterance is matched to the nearest one. That means:
+
+- Real names from the first line, with no S1/S2 guessing and no suggestion to accept.
+- No clustering errors — the failure mode where one person is split across two tags
+  disappears.
+- The voiceprints persist, so the same colleagues are recognised in future meetings
+  automatically.
+
+It is about a day of work, and it is a nicer design than diarisation-plus-naming.
+
+**2. No timestamps.** That model does not emit them. Easily worked around — the
+server knows the sample rate and how many bytes it has fed, so elapsed time is
+arithmetic. Word-level timing would be lost, which nothing currently uses.
+
+**3. No punctuation.** Streaming Paraformer emits unpunctuated text, which hurts both
+readability and the LLM's parsing. sherpa-onnx has a CT-Transformer punctuation model
+that runs offline after each utterance. Small addition, a few hours.
+
+### Other costs to be aware of
+
+- **CPU load for five hours.** Paraformer streaming is efficient and CPU-only, but a
+  laptop will run warmer and use more battery than when Deepgram does the work.
+  Worth measuring on your actual machine before relying on it.
+- **Install size.** Models are a few hundred megabytes, downloaded once. This makes
+  the Windows installer noticeably larger, or the models become a first-run download.
+- **No fallback if it is worse.** Which is why the plan below never removes Deepgram.
+
+### The part that makes this the best first move
+
+Because local STT is free and private, **you can run it against your saved meeting
+audio at zero cost and zero risk**. Turn on `SAVE_AUDIO=1`, record one real meeting,
+then transcribe that same audio with both engines and read them side by side.
+
+That finally answers the accuracy question you have been asking with evidence from
+*your* room, *your* colleagues and *your* jargon — instead of my opinion or a
+benchmark run on someone else's Cantonese. Nothing else on this list gives you that.
+
+Better still, once it works you can run local STT **alongside** Deepgram during a live
+meeting for free, and keep whichever is better.
+
+### Effort
+
+- Streaming ASR integration (`stt/sherpa_local.py` + model download): **1 day**
+- Punctuation model: **+3 hours**
+- Speaker enrollment and identification: **+1 day**
+
+**Total for full parity: 2–2.5 days.** But the first day alone is enough to answer
+the accuracy question, which is why I would start there.
+
+---
+
 ## Suggested order
 
 Grouped so related work lands together, cheapest value first.
@@ -242,14 +338,21 @@ Grouped so related work lands together, cheapest value first.
 Items 1, 4, 7, and 2. Small, independent, immediately useful. Item 4 alone should
 noticeably sharpen the advice.
 
-**Batch 2 — transcript accuracy (about 1 day)**
-Item 6, plus item 3 (Speechmatics) so you can compare engines on your own audio.
+**Batch 2 — settle the accuracy question (1–2 days)**
+Item 9 first, because it is free to run and gives you a measurable comparison on your
+own audio. Item 3 (Speechmatics) alongside it, so all three engines can be judged on
+the same recording rather than on claims. Then item 6, since whichever engine wins,
+you will still want to correct a line by hand.
 
 **Batch 3 — the review workspace (3–4 days)**
 Item 5, reusing the filtering and speaker editing from batches 1 and 2.
 
 **Batch 4 — online meetings (1–2 days)**
 Item 8, Route A first.
+
+**Note on the order change**: item 9 moved ahead of Speechmatics because it costs
+nothing to run, works on audio you have already saved, and is the only option with a
+plausible mechanism for the slang problem specifically.
 
 ---
 
