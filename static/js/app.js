@@ -132,6 +132,13 @@ const ui = {
   log: el('log'),
   history: el('history'),
   btnRefreshHistory: el('btn-refresh-history'),
+  keysBanner: el('keys-banner'),
+  keysBannerText: el('keys-banner-text'),
+  btnOpenKeys: el('btn-open-keys'),
+  keysForm: el('keys-form'),
+  keysPath: el('keys-path'),
+  keysHint: el('keys-hint'),
+  btnSaveKeys: el('btn-save-keys'),
   btnSaveMd: el('btn-save-md'),
   btnSaveJson: el('btn-save-json'),
   audioNote: el('audio-note'),
@@ -444,7 +451,10 @@ ui.btnStop.addEventListener('click', () => {
 
 ui.btnSession.addEventListener('click', () => {
   ui.drawer.hidden = !ui.drawer.hidden;
-  if (!ui.drawer.hidden) loadHistory();
+  if (!ui.drawer.hidden) {
+    loadHistory();
+    loadKeys();
+  }
 });
 
 ui.askForm.addEventListener('submit', (event) => {
@@ -474,6 +484,106 @@ function saveSession(suffix) {
   // A plain navigation: the server sets Content-Disposition, the browser saves.
   window.location = `/api/meetings/${meetingId}/export.${suffix}`;
 }
+
+// ------------------------------------------------------------------ API keys
+
+/* The form only ever shows a masked value, so an empty field means "leave this
+ * alone". Saving must never wipe a key the user did not touch. */
+async function loadKeys() {
+  try {
+    const response = await fetch('/api/settings');
+    const data = await response.json();
+    ui.keysPath.textContent = data.path;
+    ui.keysForm.innerHTML = '';
+
+    data.fields.forEach((field) => {
+      const name = field.name;
+      const wrap = document.createElement('div');
+      wrap.className = 'keys-field';
+
+      const label = document.createElement('label');
+      label.textContent = field.label;
+      label.htmlFor = `key-${name}`;
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.id = `key-${name}`;
+      input.dataset.key = name;
+      input.autocomplete = 'off';
+      if (field.secret) {
+        input.placeholder = field.set ? field.value : 'not set';
+      } else {
+        input.value = field.value || '';
+        // Remember what it arrived as, so an untouched field is not "saved".
+        input.dataset.original = field.value || '';
+      }
+
+      const source = document.createElement('span');
+      source.className = `source${field.source === 'saved in the app' ? ' saved' : ''}`;
+      source.textContent = field.set ? field.source : 'not set';
+
+      wrap.append(label, input, source);
+      ui.keysForm.append(wrap);
+    });
+  } catch (err) {
+    log(`could not load settings: ${err.message}`, true);
+  }
+}
+
+async function saveKeys() {
+  const payload = {};
+  ui.keysForm.querySelectorAll('input[data-key]').forEach((input) => {
+    const value = input.value.trim();
+    if (!value) return;                                   // blank = leave alone
+    if (value === (input.dataset.original || '')) return;  // shown, not changed
+    payload[input.dataset.key] = value;
+  });
+  if (!Object.keys(payload).length) {
+    ui.keysHint.textContent = 'nothing to save';
+    return;
+  }
+
+  ui.btnSaveKeys.disabled = true;
+  ui.keysHint.textContent = 'saving…';
+  try {
+    const response = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || response.statusText);
+
+    ui.keysHint.textContent = data.changed.length
+      ? `saved ${data.changed.length} value${data.changed.length === 1 ? '' : 's'}`
+      : 'no change';
+    applyMissingKeys(data.missing_keys || []);
+    await loadKeys();
+    log(`settings saved: ${data.changed.join(', ') || 'no change'}`);
+  } catch (err) {
+    ui.keysHint.textContent = `failed: ${err.message}`;
+    log(`could not save settings: ${err.message}`, true);
+  } finally {
+    ui.btnSaveKeys.disabled = false;
+  }
+}
+
+function applyMissingKeys(missing) {
+  if (!missing.length) {
+    ui.keysBanner.hidden = true;
+    return;
+  }
+  ui.keysBannerText.innerHTML = `Missing: <strong>${missing.join(', ')}</strong>.`;
+  ui.keysBanner.hidden = false;
+}
+
+ui.btnSaveKeys.addEventListener('click', saveKeys);
+ui.btnOpenKeys.addEventListener('click', () => {
+  ui.drawer.hidden = false;
+  loadKeys();
+  loadHistory();
+  el('key-DEEPGRAM_API_KEY')?.focus();
+});
 
 ui.btnSaveMd.addEventListener('click', () => saveSession('md'));
 ui.btnSaveJson.addEventListener('click', () => saveSession('json'));

@@ -71,6 +71,20 @@ cp .env.example .env      # then fill in DEEPGRAM_API_KEY and OPENROUTER_API_KEY
 .venv/bin/python app.py
 ```
 
+### API keys
+
+Two ways, and you only need one:
+
+- **In the app** — start it, then click **Session → API keys**, paste them in and
+  press Save. Takes effect immediately, no restart. Saved to
+  `data/settings.json`, which is not in git.
+- **In `.env`** — as before. A key entered in the app overrides the one in
+  `.env`, and the form shows you which is in force.
+
+Either way the keys are stored in plain text on your machine, exactly as `.env`
+always was. The app never sends a key back to the browser — the form shows only
+the last four characters.
+
 ### Then
 
 Open <http://127.0.0.1:5000> in Chrome or Edge. Use `127.0.0.1`, not a LAN IP:

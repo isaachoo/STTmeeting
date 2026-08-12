@@ -739,6 +739,83 @@ class TestSaveTheSession(LiveServerCase):
         self.assertEqual(caught.exception.code, 404)
 
 
+class TestSettingsOverHttp(LiveServerCase):
+    def _isolate_settings(self):
+        """Undo everything this test does to the saved settings AND to config.
+
+        Clearing a key sets config back to whatever .env had, which is nothing
+        here -- so without restoring the config values this class would strip the
+        API keys the module set up and break every test that runs after it.
+        """
+        import settings
+
+        before_file = dict(settings.load())
+        before_config = {name: getattr(config, name, "") for name in settings.FIELDS}
+
+        def restore():
+            settings.config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            if before_file:
+                with open(settings.path(), "w", encoding="utf-8") as handle:
+                    json.dump(before_file, handle)
+            else:
+                settings.path().unlink(missing_ok=True)
+            for name, value in before_config.items():
+                setattr(config, name, value)
+
+        self.addCleanup(restore)
+
+    def post_json(self, path: str, payload: dict) -> tuple[int, dict]:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, json.loads(response.read().decode())
+
+    def test_keys_can_be_entered_and_never_come_back_out(self):
+        import settings
+
+        self._isolate_settings()
+
+        status, body = self.post_json(
+            "/api/settings", {"DEEPGRAM_API_KEY": "dg_totally_secret_value"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["changed"], ["DEEPGRAM_API_KEY"])
+
+        # The response, and any later read, must not contain the raw key.
+        self.assertNotIn("dg_totally_secret_value", json.dumps(body))
+        _, described, _ = self.get("/api/settings")
+        self.assertNotIn("dg_totally_secret_value", described)
+        fields = json.loads(described)["fields"]
+        deepgram = next(f for f in fields if f["name"] == "DEEPGRAM_API_KEY")
+        self.assertTrue(deepgram["set"])
+        self.assertTrue(deepgram["value"].startswith("•"))
+
+    def test_saving_a_key_clears_it_from_the_missing_list(self):
+        import settings
+
+        self._isolate_settings()
+        _, body = self.post_json("/api/settings", {"DEEPGRAM_API_KEY": "dg", })
+        self.assertNotIn("DEEPGRAM_API_KEY", body["missing_keys"])
+        self.assertIn("deepgram", body["providers_ready"])
+
+    def test_a_non_object_body_is_refused(self):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/settings",
+            data=b'"just a string"',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                self.assertEqual(response.status, 400)
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 400)
+
+
 class TestReconnectAndGuards(LiveServerCase):
     def test_a_second_tab_gets_a_snapshot_and_shares_the_meeting(self):
         ws = self.start_meeting()

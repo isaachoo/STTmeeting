@@ -520,3 +520,12 @@ button.primary#btn-pause { background: var(--warn); border-color: var(--warn); c
 .line .who:hover { outline: 1px solid var(--accent); }
 .line .who.overridden { box-shadow: inset 0 -2px 0 var(--warn); }
 .popover-scope { margin: -4px 0 8px; }
+
+/* API keys in the drawer */
+.keys-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 9px; }
+.keys-field label { font-size: 12px; color: var(--muted); }
+.keys-field .source { font-size: 11px; color: #5b6371; }
+.keys-field .source.saved { color: var(--good); }
+.keys-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.banner.error { display: flex; align-items: center; gap: 10px; }
+.banner.error[hidden] { display: none; }

@@ -28,12 +28,12 @@
   </div>
 </header>
 
-{% if missing_keys %}
-<div class="banner error">
-  Missing configuration: <strong>{{ missing_keys|join(', ') }}</strong>.
-  Copy <code>.env.example</code> to <code>.env</code>, fill it in, and restart.
+<div class="banner error" id="keys-banner" {% if not missing_keys %}hidden{% endif %}>
+  <span id="keys-banner-text">
+    Missing: <strong>{{ missing_keys|join(', ') }}</strong>.
+  </span>
+  <button id="btn-open-keys" class="ghost small">Enter API keys</button>
 </div>
-{% endif %}
 
 <!-- Slide-down drawer: cost detail, saving the session, history, log. -->
 <section id="drawer" class="drawer" hidden>
@@ -72,7 +72,19 @@
       <div class="log" id="log"></div>
     </div>
 
-    <div class="drawer-col">
+    <div class="drawer-col" id="keys-col">
+      <h3 class="sub">API keys</h3>
+      <p class="muted small">
+        Saved to <code id="keys-path">data/settings.json</code> on this machine,
+        in plain text — treat it like <code>.env</code>. Leave a field blank to
+        keep the key that is already there.
+      </p>
+      <form id="keys-form"></form>
+      <div class="keys-actions">
+        <button id="btn-save-keys" class="primary small" type="button">Save keys</button>
+        <span class="muted small" id="keys-hint"></span>
+      </div>
+
       <h3 class="sub">Past meetings</h3>
       <button id="btn-refresh-history" class="ghost small">Refresh</button>
       <div class="history" id="history"><p class="muted small">Nothing saved yet.</p></div>

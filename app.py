@@ -21,11 +21,12 @@ import logging
 import queue
 import threading
 
-from flask import Flask, Response, jsonify, render_template
+from flask import Flask, Response, jsonify, render_template, request
 from flask_sock import Sock
 from simple_websocket import ConnectionClosed
 
 import config
+import settings
 from copilot.brief import Brief
 from session import MeetingSession
 from storage import db, export
@@ -46,6 +47,9 @@ app.config["SECRET_KEY"] = config.SECRET_KEY
 # Leaving pings off makes the handler thread the only writer. Nothing is lost:
 # the meeting generates constant traffic, and the client reconnects by itself.
 sock = Sock(app)
+
+# Keys saved in the app take effect for every entry point, not just main().
+settings.apply_to_config()
 
 POLL_SECONDS = 0.02  # inbound poll interval; also the outbound flush cadence
 OUTBOUND_MAX = 500  # per client; a wedged browser must not grow memory here
@@ -161,6 +165,34 @@ def health():
             "notes_model": config.OPENROUTER_NOTES_MODEL,
             "web_search": bool(config.TAVILY_API_KEY),
             "meeting_running": bool(_session and not _session.stopped),
+        }
+    )
+
+
+@app.get("/api/settings")
+def get_settings():
+    """Masked values only -- this never returns a usable key."""
+    return jsonify(settings.describe())
+
+
+@app.post("/api/settings")
+def post_settings():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "expected an object"}), 400
+    try:
+        changed = settings.save(payload)
+    except OSError as exc:
+        return jsonify({"error": f"could not save: {exc}"}), 500
+    return jsonify(
+        {
+            "changed": changed,
+            "settings": settings.describe(),
+            "missing_keys": config.missing_keys(),
+            "providers_ready": {
+                p["code"]: not config.missing_keys(p["code"])
+                for p in config.STT_PROVIDER_CHOICES
+            },
         }
     )
 
@@ -385,6 +417,7 @@ def _cost_ticker(session: MeetingSession) -> None:
 
 def main() -> None:
     db.init()
+    settings.apply_to_config()
     missing = config.missing_keys()
     if missing:
         log.warning(
