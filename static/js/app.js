@@ -101,6 +101,7 @@ const ui = {
   inGlossary: el('in-glossary'),
   inMicMode: el('in-mic-mode'),
   inMyRole: el('in-my-role'),
+  inProvider: el('in-provider'),
   inLanguage: el('in-language'),
   inModel: el('in-model'),
   attendees: el('attendees'),
@@ -144,6 +145,7 @@ const ui = {
 
   popover: el('name-popover'),
   popLabel: el('pop-label'),
+  popScope: el('pop-scope'),
   popRoster: el('pop-roster'),
   popForm: el('pop-form'),
   popName: el('pop-name'),
@@ -161,8 +163,10 @@ let speakerNames = {}; // diarisation index (as string) -> name
 let knownSpeakers = new Set();
 let rosterNames = []; // from the pre-meeting attendee list
 let popoverSpeaker = null;
+let popoverSegment = null;
 let paused = false;
 let speakerFilter = new Set();   // empty = show everyone
+let provider = 'deepgram';
 
 // ------------------------------------------------------------------ utilities
 
@@ -386,10 +390,12 @@ ui.btnStart.addEventListener('click', async () => {
       sample_rate: sampleRate,
       language: ui.inLanguage.value,
       model: ui.inModel.value,
+      provider: ui.inProvider.value,
     });
     // Remember the choice for next time.
     localStorage.setItem('stt_language', ui.inLanguage.value);
     localStorage.setItem('stt_model', ui.inModel.value);
+    localStorage.setItem('stt_provider', ui.inProvider.value);
   } catch (err) {
     stopCapture();
     ui.btnStart.disabled = false;
@@ -519,6 +525,17 @@ async function loadHistory() {
 
 function renderSpeakerChips() {
   ui.speakerChips.innerHTML = '';
+  if (!knownSpeakers.size && running) {
+    // The local engine does not diarise, so no voice-level chips ever appear.
+    // Without this the panel head just looks broken.
+    const hint = document.createElement('span');
+    hint.className = 'muted small';
+    hint.textContent = provider === 'local'
+      ? 'no speaker separation — click a line to name it'
+      : 'listening for voices…';
+    ui.speakerChips.append(hint);
+    return;
+  }
   [...knownSpeakers].sort((a, b) => a - b).forEach((speaker) => {
     const named = speakerNames[String(speaker)];
     const chip = document.createElement('span');
@@ -593,6 +610,9 @@ ui.btnClearFilter.addEventListener('click', clearSpeakerFilter);
 
 function relabelTranscript() {
   ui.transcript.querySelectorAll('.line').forEach((line) => {
+    // A per-line correction outranks the voice-level name: the user told us
+    // this line specifically, so renaming the voice must not undo it.
+    if (line.dataset.override) return;
     const speaker = line.dataset.speaker;
     if (speaker === '' || speaker === undefined) return;
     const who = line.querySelector('.who');
@@ -600,10 +620,19 @@ function relabelTranscript() {
   });
 }
 
-function openPopover(speaker, anchor) {
+function openPopover(speaker, anchor, segmentIndex = null) {
   popoverSpeaker = speaker;
-  ui.popLabel.textContent = `S${speaker + 1}`;
-  ui.popName.value = speakerNames[String(speaker)] || '';
+  popoverSegment = segmentIndex;
+  const isLine = segmentIndex !== null;
+  ui.popLabel.textContent = isLine
+    ? `this line (${labelFor(speaker)})`
+    : (speaker === null || speaker === undefined ? '?' : `S${speaker + 1}`);
+  ui.popScope.textContent = isLine
+    ? 'Changes this line only — use the chip above to rename the whole voice.'
+    : 'Renames every line from this voice.';
+  ui.popName.value = isLine
+    ? (lineOverride(segmentIndex) || '')
+    : (speakerNames[String(speaker)] || '');
 
   // Offer the roster first: one click is the common case.
   ui.popRoster.innerHTML = '';
@@ -617,7 +646,7 @@ function openPopover(speaker, anchor) {
       button.title = 'already assigned to another voice';
       button.style.opacity = '0.5';
     }
-    button.addEventListener('click', () => nameSpeaker(speaker, name));
+    button.addEventListener('click', () => applyName(name));
     ui.popRoster.append(button);
   });
 
@@ -632,22 +661,32 @@ function openPopover(speaker, anchor) {
 function closePopover() {
   ui.popover.hidden = true;
   popoverSpeaker = null;
+  popoverSegment = null;
 }
 
-function nameSpeaker(speaker, name) {
-  socket.emit('name_speaker', { speaker, name });
+function lineOverride(index) {
+  const line = ui.transcript.querySelector(`.line[data-index="${index}"]`);
+  return line ? line.dataset.override || '' : '';
+}
+
+/* One popover, two scopes: a whole voice (from a chip) or a single line (from
+ * the tag on that line). Per-line exists because diarisation splits one person
+ * across two voices and merges two into one, which renaming a voice cannot fix. */
+function applyName(name) {
+  if (popoverSegment !== null) {
+    socket.emit('name_segment', { index: popoverSegment, name });
+  } else if (popoverSpeaker !== null && popoverSpeaker !== undefined) {
+    socket.emit('name_speaker', { speaker: popoverSpeaker, name });
+  }
   closePopover();
 }
 
 ui.popForm.addEventListener('submit', (event) => {
   event.preventDefault();
-  if (popoverSpeaker === null) return;
-  nameSpeaker(popoverSpeaker, ui.popName.value.trim());
+  applyName(ui.popName.value.trim());
 });
 
-ui.popClear.addEventListener('click', () => {
-  if (popoverSpeaker !== null) nameSpeaker(popoverSpeaker, '');
-});
+ui.popClear.addEventListener('click', () => applyName(''));
 
 document.addEventListener('click', (event) => {
   if (ui.popover.hidden) return;
@@ -708,10 +747,18 @@ function addSegment(seg) {
   const line = document.createElement('p');
   line.className = 'line';
   line.dataset.speaker = seg.speaker === null || seg.speaker === undefined ? '' : seg.speaker;
+  line.dataset.index = seg.index;
+  if (seg.speaker_name) line.dataset.override = seg.speaker_name;
 
-  const who = document.createElement('span');
-  who.className = `who${seg.speaker !== null && seg.speaker !== undefined ? ` s${seg.speaker % 4}` : ''}`;
+  const who = document.createElement('button');
+  who.className = `who${seg.speaker !== null && seg.speaker !== undefined ? ` s${seg.speaker % 4}` : ''}`
+    + (seg.speaker_name ? ' overridden' : '');
   who.textContent = seg.speaker_label || labelFor(seg.speaker);
+  who.title = 'Wrong speaker? Click to fix just this line';
+  who.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openPopover(seg.speaker, who, seg.index);
+  });
 
   const said = document.createElement('span');
   said.className = 'said';
@@ -988,6 +1035,12 @@ function renderNotes(notes) {
 
 function renderCost(cost) {
   ui.costTotal.textContent = usd(cost.total_usd);
+  if (cost.provider) {
+    const free = !cost.stt_usd_per_minute;
+    ui.costTotal.title = free
+      ? `${cost.provider}: transcription is free`
+      : `${cost.provider}: $${cost.stt_usd_per_minute}/min of audio`;
+  }
   ui.dCostTotal.textContent = usd(cost.total_usd);
   ui.dCostStt.textContent = usd(cost.stt_usd);
   ui.dCostLlm.textContent = usd(cost.llm_usd);
@@ -1037,6 +1090,10 @@ socket.on('snapshot', (snap) => {
   ui.filterBar.hidden = true;
   fillBrief(snap.brief);
   if (snap.language) ui.inLanguage.value = snap.language;
+  if (snap.provider) {
+    provider = snap.provider;
+    ui.inProvider.value = snap.provider;
+  }
 
   ui.transcript.innerHTML = '';
   (snap.segments || []).forEach(addSegment);
@@ -1096,6 +1153,7 @@ socket.on('snapshot', (snap) => {
 socket.on('meeting_started', (snap) => {
   setRunning(true);
   meetingId = snap.meeting_id;
+  provider = snap.provider || ui.inProvider.value;
   startedAtMs = Date.now();
   speakerNames = {};
   knownSpeakers = new Set();
@@ -1161,6 +1219,17 @@ socket.on('paused', (payload) => {
   log(payload.paused ? 'paused; no audio is being sent or billed' : 'resumed');
 });
 
+socket.on('segment_speaker', (seg) => {
+  const line = ui.transcript.querySelector(`.line[data-index="${seg.index}"]`);
+  if (!line) return;
+  line.dataset.override = seg.speaker_name || '';
+  const who = line.querySelector('.who');
+  if (who) {
+    who.textContent = seg.speaker_label;
+    who.classList.toggle('overridden', !!seg.speaker_name);
+  }
+});
+
 socket.on('speaker_suggestion', renderSuggestion);
 socket.on('speaker_suggestion_cleared', () => { ui.suggestion.hidden = true; });
 
@@ -1185,5 +1254,7 @@ addAttendeeRow();
 // Restore the language/model chosen last time.
 const savedLanguage = localStorage.getItem('stt_language');
 const savedModel = localStorage.getItem('stt_model');
+const savedProvider = localStorage.getItem('stt_provider');
 if (savedLanguage) ui.inLanguage.value = savedLanguage;
 if (savedModel) ui.inModel.value = savedModel;
+if (savedProvider) ui.inProvider.value = savedProvider;

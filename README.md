@@ -93,6 +93,7 @@ knowing about:
 
 | Variable | Default | What it does |
 |---|---|---|
+| `STT_PROVIDER` | `deepgram` | `deepgram`, `speechmatics`, or `local` — also selectable per meeting |
 | `DEEPGRAM_LANGUAGE` | `zh-HK` | Cantonese Traditional |
 | `DEEPGRAM_MODELS` | `nova-3,nova-2` | Tried in order; falls back automatically if a model will not accept the language |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v3.2` | The advisor. Cheap and fast matters more than clever here |
@@ -106,6 +107,48 @@ knowing about:
 | `DEEPGRAM_KEYTERMS` | `1` | Boost the glossary and attendee names in the transcriber |
 | `SPEAKER_GUESS_INTERVAL` | `120` | Seconds between attempts to work out which voice is whom |
 | `SAVE_AUDIO` | `0` | Write the raw meeting audio to `data/audio/` for later tuning |
+
+## Three transcribers
+
+Chosen per meeting in the form, or set a default with `STT_PROVIDER`. The `stt/`
+package hides the differences, so everything downstream — naming, filtering,
+notes, exports — works the same whichever one is running.
+
+| | Deepgram | Speechmatics | Local (sherpa-onnx) |
+|---|---|---|---|
+| Cost per 5-hour meeting | ~$2.31 | ~$5.20 | **free** |
+| Audio leaves your machine | yes | yes | **no** |
+| Works offline | no | no | **yes** |
+| Speaker diarization | yes | yes | **no** |
+| Punctuation | yes | yes | with the extra model |
+| Extra setup | none | none | one download |
+
+### Running transcription locally
+
+```bash
+pip install -r requirements-local.txt
+python scripts/download_models.py --punct
+```
+
+Then pick **Local** in the form, or set `STT_PROVIDER=local`.
+
+The model is
+`sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en` — Mandarin,
+Cantonese and English in one pass, which is how people actually speak in a Hong
+Kong office. It runs on the CPU at roughly **eleven times faster than real
+time** on two threads, so keeping up is not a concern and no GPU is needed.
+
+Two things it does that the cloud engines do not, both handled automatically:
+
+- It emits **no punctuation**, so a punctuation model runs over each finished
+  utterance (that is what `--punct` fetches).
+- It writes **simplified characters even for Cantonese speech**, so OpenCC maps
+  the result to Hong Kong traditional. That is a deterministic mapping, unlike
+  asking an LLM to guess at it.
+
+And one thing it cannot do: **it does not separate speakers.** Every line
+arrives unattributed, so click a line's speaker tag to name it. In exchange, the
+audio never leaves your laptop and transcription costs nothing.
 
 ## What a meeting costs
 
@@ -151,6 +194,12 @@ zero, or a fast back-and-forth would spam the model.
 advised and already said out loud, and a near-duplicate attendee turn is dropped
 server-side even if the model produces one. A participant that says the same
 sentence three times is the worst failure this panel has.
+
+**A correction on one line beats a name on the whole voice.** Diarisation splits
+one person across two voices and merges two people into one, which renaming a
+voice cannot fix, so any line's speaker tag can be clicked and set on its own.
+That override then survives a voice-level rename and an accepted suggestion —
+the user telling us about a specific line outranks anything inferred.
 
 **Speaker names are suggested, never assumed.** Diarisation separates the voices;
 the copilot proposes which voice is which person from self-introductions and

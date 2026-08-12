@@ -43,13 +43,20 @@ class Segment:
     text: str
     speaker: int | None
     at: float
+    # A name set on this line specifically, which beats the voice-level name.
+    # Diarisation splits and merges voices, so some lines need fixing one by one.
+    speaker_name: str = ""
+
+    def label(self, speaker_names: dict[int, str] | None = None) -> str:
+        return self.speaker_name or label_for(self.speaker, speaker_names)
 
     def as_dict(self, speaker_names: dict[int, str] | None = None) -> dict:
         return {
             "index": self.index,
             "text": self.text,
             "speaker": self.speaker,
-            "speaker_label": label_for(self.speaker, speaker_names),
+            "speaker_label": self.label(speaker_names),
+            "speaker_name": self.speaker_name,
             "at": self.at,
         }
 
@@ -118,7 +125,7 @@ class MeetingState:
     def render(self, segments: list[Segment]) -> str:
         with self.lock:
             names = dict(self.speaker_names)
-        return "\n".join(f"{label_for(s.speaker, names)}: {s.text}" for s in segments)
+        return "\n".join(f"{s.label(names)}: {s.text}" for s in segments)
 
     def text_from(self, index: int) -> str:
         with self.lock:
@@ -151,6 +158,15 @@ class MeetingState:
     def observed_speakers(self) -> list[int]:
         with self.lock:
             return sorted({s.speaker for s in self.segments if s.speaker is not None})
+
+    def set_segment_speaker(self, index: int, name: str) -> Segment | None:
+        """Name one line. Returns the segment, or None if the index is unknown."""
+        cleaned = (name or "").strip()[:80]
+        with self.lock:
+            if not 0 <= index < len(self.segments):
+                return None
+            self.segments[index].speaker_name = cleaned
+            return self.segments[index]
 
     def set_speaker_name(self, speaker: int, name: str) -> str:
         """Name a voice, or clear the name with an empty string."""

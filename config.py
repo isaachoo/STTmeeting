@@ -33,7 +33,17 @@ def _bool(name: str, default: bool = False) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
-# --- Speech to text ---
+# --- Speech to text: which engine ---
+# deepgram | speechmatics | local
+STT_PROVIDER = (os.getenv("STT_PROVIDER") or "deepgram").strip().lower()
+
+STT_PROVIDER_CHOICES = [
+    {"code": "deepgram", "label": "Deepgram — cloud, fast, ~$0.0077/min"},
+    {"code": "speechmatics", "label": "Speechmatics — cloud, Cantonese + diarization"},
+    {"code": "local", "label": "Local (sherpa-onnx) — offline, free, no diarization"},
+]
+
+# --- Deepgram ---
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "").strip()
 DEEPGRAM_LANGUAGE = os.getenv("DEEPGRAM_LANGUAGE", "zh-HK").strip()
 DEEPGRAM_MODELS = [
@@ -67,6 +77,47 @@ def models_from(preferred: str) -> list[str]:
     if preferred not in known:
         return list(DEEPGRAM_MODELS)
     return [preferred] + [m for m in known if m != preferred]
+
+# --- Speechmatics ---
+SPEECHMATICS_API_KEY = os.getenv("SPEECHMATICS_API_KEY", "").strip()
+SPEECHMATICS_URL = os.getenv(
+    "SPEECHMATICS_URL", "wss://eu2.rt.speechmatics.com/v2"
+).strip()
+SPEECHMATICS_OPERATING_POINT = (
+    os.getenv("SPEECHMATICS_OPERATING_POINT") or "enhanced"
+).strip()
+SPEECHMATICS_USD_PER_MINUTE = _float("SPEECHMATICS_USD_PER_MINUTE", 0.0173)
+
+# Speechmatics uses ISO codes rather than Deepgram's locale strings, so the
+# language chosen in the form has to be translated on the way through.
+_SPEECHMATICS_LANGUAGES = {
+    "zh-HK": "yue",
+    "zh-CN": "cmn",
+    "zh-TW": "cmn",
+    "zh": "cmn",
+    "en": "en",
+    "multi": "en",
+}
+
+
+def speechmatics_language(code: str) -> str:
+    return _SPEECHMATICS_LANGUAGES.get((code or "").strip(), (code or "en").strip())
+
+
+# --- Local model (sherpa-onnx) ---
+SHERPA_MODEL_DIR = Path(
+    os.getenv("SHERPA_MODEL_DIR")
+    or DATA_DIR / "models" / "sherpa-onnx-streaming-paraformer-trilingual-zh-cantonese-en"
+)
+SHERPA_PUNCTUATION_DIR = Path(
+    os.getenv("SHERPA_PUNCTUATION_DIR")
+    or DATA_DIR / "models" / "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12"
+)
+SHERPA_NUM_THREADS = _int("SHERPA_NUM_THREADS", 2)
+SHERPA_PUNCTUATE = _bool("SHERPA_PUNCTUATE", True)
+# The model writes simplified characters even for Cantonese speech; OpenCC maps
+# them to Hong Kong traditional.
+SHERPA_TO_TRADITIONAL = _bool("SHERPA_TO_TRADITIONAL", True)
 
 # --- LLM ---
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -122,11 +173,18 @@ SAVE_AUDIO = _bool("SAVE_AUDIO", False)
 DB_PATH = DATA_DIR / "meetings.sqlite3"
 
 
-def missing_keys() -> list[str]:
-    """Keys the app cannot run without."""
+def missing_keys(provider: str | None = None) -> list[str]:
+    """Keys the app cannot run without, for the chosen transcriber.
+
+    The local engine needs no speech key at all, so demanding one would block a
+    setup that is perfectly able to run.
+    """
+    provider = (provider or STT_PROVIDER or "deepgram").strip().lower()
     missing = []
-    if not DEEPGRAM_API_KEY:
+    if provider == "deepgram" and not DEEPGRAM_API_KEY:
         missing.append("DEEPGRAM_API_KEY")
+    if provider == "speechmatics" and not SPEECHMATICS_API_KEY:
+        missing.append("SPEECHMATICS_API_KEY")
     if not OPENROUTER_API_KEY:
         missing.append("OPENROUTER_API_KEY")
     return missing

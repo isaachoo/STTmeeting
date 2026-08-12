@@ -7,3 +7,4 @@ data/
 *.sqlite3
 *.wav
 .DS_Store
+data/models/

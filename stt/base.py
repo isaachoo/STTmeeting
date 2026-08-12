@@ -39,3 +39,23 @@ class STTEngine(ABC):
     @abstractmethod
     def audio_seconds(self) -> float:
         """Seconds of audio submitted so far, for the cost readout."""
+
+    @property
+    def provider(self) -> str:
+        """Short provider name, shown in the UI and saved with the meeting."""
+        return self.__class__.__name__
+
+    @property
+    def model(self) -> str:
+        """Whatever model is actually in use, after any fallback."""
+        return ""
+
+    @property
+    def usd_per_minute(self) -> float:
+        """Price of a minute of audio, so the cost readout is honest about a
+        local engine being free rather than quietly using Deepgram's rate."""
+        return 0.0
+
+    def join(self, timeout: float = 5.0) -> None:
+        """Wait for the engine's threads to finish. Used by tests and shutdown."""
+        return None

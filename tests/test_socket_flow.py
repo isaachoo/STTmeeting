@@ -639,6 +639,62 @@ class TestSpeakerNaming(LiveServerCase):
         )
 
 
+class TestPerLineSpeakerOverTheWire(LiveServerCase):
+    def test_correcting_one_line_leaves_the_others_alone(self):
+        ws = self.start_meeting()
+        meeting_id = self.app_module._session.meeting_id
+        ws.push_utterance("第一句", speaker=0)
+        ws.push_utterance("第二句", speaker=0)
+        self.browser.wait("segment", 2)
+
+        # Name the voice, then correct only the second line.
+        self.browser.emit("name_speaker", {"speaker": 0, "name": "Alan"})
+        self.browser.wait("speakers")
+        self.browser.emit("name_segment", {"index": 1, "name": "Wing"})
+        corrected = self.browser.wait("segment_speaker")[-1]
+        self.assertEqual(corrected["index"], 1)
+        self.assertEqual(corrected["speaker_label"], "Wing")
+
+        snapshot = self.browser.request_snapshot()
+        self.assertEqual(
+            [s["speaker_label"] for s in snapshot["segments"]], ["Alan", "Wing"]
+        )
+
+        stored = self.db.get_meeting(meeting_id)
+        self.assertEqual([s["speaker_name"] for s in stored["segments"]], ["", "Wing"])
+
+    def test_a_voice_rename_does_not_undo_a_line_correction(self):
+        ws = self.start_meeting()
+        ws.push_utterance("一句", speaker=0)
+        self.browser.wait("segment")
+        self.browser.emit("name_segment", {"index": 0, "name": "Kelvin"})
+        self.browser.wait("segment_speaker")
+
+        self.browser.emit("name_speaker", {"speaker": 0, "name": "Alan"})
+        self.browser.wait("speakers")
+        snapshot = self.browser.request_snapshot()
+        self.assertEqual(
+            snapshot["segments"][0]["speaker_label"], "Kelvin",
+            "a correction on the line must outrank a name on the voice",
+        )
+
+    def test_a_nonsense_line_index_is_ignored(self):
+        self.start_meeting()
+        for bad in ({"index": "abc", "name": "X"}, {"index": 99, "name": "X"}, {"name": "X"}):
+            self.browser.emit("name_segment", bad)
+        time.sleep(0.3)
+        self.assertEqual(self.browser.got("segment_speaker"), [])
+        self.browser.request_snapshot()  # connection still healthy
+
+    def test_the_provider_is_reported_in_the_snapshot_and_cost(self):
+        self.start_meeting()
+        snapshot = self.browser.request_snapshot()
+        self.assertEqual(snapshot["provider"], "deepgram")
+        costs = self.browser.wait("cost")
+        self.assertEqual(costs[-1]["provider"], "deepgram")
+        self.assertGreater(costs[-1]["stt_usd_per_minute"], 0)
+
+
 class TestSaveTheSession(LiveServerCase):
     def test_markdown_and_json_downloads_work_mid_meeting(self):
         ws = self.start_meeting()

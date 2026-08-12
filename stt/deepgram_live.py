@@ -143,8 +143,18 @@ class DeepgramLiveSTT(STTEngine):
         return self._bytes_sent / bytes_per_second if bytes_per_second else 0.0
 
     @property
+    def provider(self) -> str:
+        return "deepgram"
+
+    @property
     def model(self) -> str:
         return self.models[min(self._model_index, len(self.models) - 1)]
+
+    @property
+    def usd_per_minute(self) -> float:
+        import config  # noqa: PLC0415 - avoids a circular import at module load
+
+        return config.DEEPGRAM_USD_PER_MINUTE
 
     # ------------------------------------------------------------- connection
 

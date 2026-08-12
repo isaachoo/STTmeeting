@@ -509,3 +509,14 @@ button.primary#btn-pause { background: var(--warn); border-color: var(--warn); c
 }
 .chip-speaker .chip-label:hover { color: var(--accent); }
 .chip-speaker .chip-rename:hover { color: var(--text); }
+
+/* per-line speaker correction */
+.line .who {
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+.line .who:hover { outline: 1px solid var(--accent); }
+.line .who.overridden { box-shadow: inset 0 -2px 0 var(--warn); }
+.popover-scope { margin: -4px 0 8px; }

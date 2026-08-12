@@ -15,7 +15,7 @@ from copilot.brief import Brief
 from copilot.engine import CopilotEngine
 from copilot.llm import OpenRouterClient
 from copilot.state import MeetingState
-from stt.deepgram_live import DeepgramLiveSTT
+from stt import create_engine
 from storage import db
 
 log = logging.getLogger(__name__)
@@ -26,12 +26,14 @@ MAX_SAMPLE_RATE = 48000
 
 class MeetingSession:
     def __init__(self, brief: Brief, sample_rate: int, emit,
-                 language: str | None = None, model: str | None = None):
+                 language: str | None = None, model: str | None = None,
+                 provider: str | None = None):
         self.sample_rate = _validate_sample_rate(sample_rate)
         self._emit = emit
         self._lock = threading.Lock()
         self.language = (language or config.DEEPGRAM_LANGUAGE).strip()
-        models = config.models_from((model or "").strip())
+        self.provider = (provider or config.STT_PROVIDER).strip().lower()
+        chosen_model = (model or "").strip()
         # Paused means the microphone is muted, not that the meeting ended: the
         # Deepgram socket stays open on keepalives, so no audio is billed and
         # resuming needs no reconnect and no second microphone prompt.
@@ -50,7 +52,7 @@ class MeetingSession:
             title=brief.title,
             brief=brief.as_dict(),
             language=self.language,
-            stt_model=models[0] if models else "",
+            stt_model=chosen_model,
         )
         self.state = MeetingState(meeting_id=self.meeting_id, brief=brief)
 
@@ -59,12 +61,12 @@ class MeetingSession:
         self.llm = OpenRouterClient()
         self.engine = CopilotEngine(self.state, self.llm, self._engine_emit)
 
-        self.stt = DeepgramLiveSTT(
-            api_key=config.DEEPGRAM_API_KEY,
+        self.stt = create_engine(
+            provider=self.provider,
             sample_rate=self.sample_rate,
             language=self.language,
-            models=models,
-            keyterms=brief.keyterms() if config.DEEPGRAM_KEYTERMS else [],
+            model=chosen_model,
+            keyterms=brief.keyterms(),
             on_interim=self._on_interim,
             on_utterance=self._on_utterance,
             on_status=self._on_stt_status,
@@ -177,6 +179,17 @@ class MeetingSession:
         db.save_speakers(self.meeting_id, names)
         self._emit("speakers", {"speaker_names": _stringify(names)})
 
+    def set_segment_speaker(self, index: int, name: str) -> None:
+        """Correct the speaker on one line. Beats the voice-level name, because
+        it is the user telling us something the diarisation got wrong."""
+        seg = self.state.set_segment_speaker(index, name)
+        if seg is None:
+            return
+        db.set_segment_speaker(self.meeting_id, index, seg.speaker_name)
+        with self.state.lock:
+            names = dict(self.state.speaker_names)
+        self._emit("segment_speaker", seg.as_dict(names))
+
     def apply_speaker_suggestion(self, accept: bool) -> None:
         with self.state.lock:
             suggestion = self.state.speaker_suggestion
@@ -246,7 +259,12 @@ class MeetingSession:
 
     def cost(self) -> dict:
         audio_minutes = self.stt.audio_seconds / 60.0
-        stt_usd = audio_minutes * config.DEEPGRAM_USD_PER_MINUTE
+        # Each engine prices its own minute -- the local one is free, and saying
+        # otherwise would make the readout a lie.
+        rate = self.stt.usd_per_minute
+        if self.provider == "deepgram":
+            rate = config.DEEPGRAM_USD_PER_MINUTE
+        stt_usd = audio_minutes * rate
         llm = self.llm.usage.snapshot()
         return {
             "elapsed_seconds": round(self.state.elapsed(), 1),
@@ -258,6 +276,8 @@ class MeetingSession:
             "prompt_tokens": llm["prompt_tokens"],
             "completion_tokens": llm["completion_tokens"],
             "stt_model": self.stt.model,
+            "provider": self.provider,
+            "stt_usd_per_minute": rate,
         }
 
     def snapshot(self) -> dict:
@@ -271,6 +291,7 @@ class MeetingSession:
                 "running": not self.stopped,
                 "paused": self.paused,
                 "language": self.language,
+                "provider": self.provider,
                 "status": self.stt_status,
                 "error": self.error,
                 "interim": self.interim,

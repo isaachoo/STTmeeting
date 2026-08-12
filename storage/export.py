@@ -12,6 +12,13 @@ import json
 from copilot.state import label_for
 
 
+def _speaker_of(segment: dict, names: dict) -> str:
+    """A name set on the line itself wins over the voice-level name."""
+    return (segment.get("speaker_name") or "").strip() or label_for(
+        segment.get("speaker"), names
+    )
+
+
 def _clock(seconds) -> str:
     total = int(seconds or 0)
     return f"{total // 3600:d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
@@ -62,7 +69,7 @@ def to_json(meeting: dict) -> str:
                 "at": s["at"],
                 "at_clock": _clock(s["at"]),
                 "speaker": s["speaker"],
-                "speaker_label": label_for(s["speaker"], meeting.get("speaker_names")),
+                "speaker_label": _speaker_of(s, meeting.get("speaker_names") or {}),
                 "text": s["text"],
             }
             for s in meeting.get("segments") or []
@@ -181,7 +188,7 @@ def to_markdown(meeting: dict) -> str:
         ]
     out += ["## Full transcript", ""]
     for segment in meeting.get("segments") or []:
-        label = label_for(segment["speaker"], names)
+        label = _speaker_of(segment, names)
         out.append(f"`{_clock(segment['at'])}` **{label}**: {segment['text']}")
     out.append("")
 

@@ -110,6 +110,14 @@
     </label>
     <div class="stt-row">
       <label>
+        Transcriber
+        <select id="in-provider">
+          {% for prov in providers %}
+          <option value="{{ prov.code }}" {% if prov.code == default_provider %}selected{% endif %}>{{ prov.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
         Language
         <select id="in-language">
           {% for lang in languages %}
@@ -244,6 +252,7 @@
 <!-- Popover for naming a voice. Moved next to whichever chip was clicked. -->
 <div id="name-popover" class="popover" hidden>
   <div class="popover-title">Who is <span id="pop-label"></span>?</div>
+  <div class="popover-scope muted small" id="pop-scope"></div>
   <div id="pop-roster" class="pop-roster"></div>
   <form id="pop-form">
     <input id="pop-name" type="text" placeholder="or type a name" autocomplete="off">

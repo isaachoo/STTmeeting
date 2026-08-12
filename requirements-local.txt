@@ -1,0 +1,13 @@
+# Optional: run transcription locally and offline instead of using a cloud API.
+#
+#   pip install -r requirements-local.txt
+#   python scripts/download_models.py --punct
+#   set STT_PROVIDER=local in .env
+#
+# Adds roughly 250 MB of wheels plus ~500 MB of models. The app runs fine
+# without any of this -- the cloud providers need none of it.
+
+sherpa-onnx==1.13.5
+numpy>=1.24
+# Maps the model's simplified-character output to Hong Kong traditional.
+opencc-python-reimplemented==0.1.7

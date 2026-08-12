@@ -50,8 +50,17 @@ CREATE INDEX IF NOT EXISTS events_meeting ON events(meeting_id, id);
 # Columns added after the first release. Applied on every init so an existing
 # database from an earlier version keeps working instead of erroring.
 MIGRATIONS = {
-    "brief_json": "ALTER TABLE meetings ADD COLUMN brief_json TEXT NOT NULL DEFAULT '{}'",
-    "speakers_json": "ALTER TABLE meetings ADD COLUMN speakers_json TEXT NOT NULL DEFAULT '{}'",
+    "meetings": {
+        "brief_json": "ALTER TABLE meetings ADD COLUMN brief_json TEXT NOT NULL DEFAULT '{}'",
+        "speakers_json": "ALTER TABLE meetings ADD COLUMN speakers_json TEXT NOT NULL DEFAULT '{}'",
+        "provider": "ALTER TABLE meetings ADD COLUMN provider TEXT NOT NULL DEFAULT ''",
+    },
+    # A name attached to one line, overriding whatever the diarisation said.
+    # Needed because engines split one person across two voices, or merge two
+    # people into one, and no amount of voice-level naming fixes that.
+    "segments": {
+        "speaker_name": "ALTER TABLE segments ADD COLUMN speaker_name TEXT NOT NULL DEFAULT ''",
+    },
 }
 
 
@@ -67,10 +76,11 @@ def _connect() -> sqlite3.Connection:
 def init() -> None:
     with _connect() as conn:
         conn.executescript(SCHEMA)
-        existing = {row["name"] for row in conn.execute("PRAGMA table_info(meetings)")}
-        for column, statement in MIGRATIONS.items():
-            if column not in existing:
-                conn.execute(statement)
+        for table, columns in MIGRATIONS.items():
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for column, statement in columns.items():
+                if column not in existing:
+                    conn.execute(statement)
 
 
 def create_meeting(
@@ -127,6 +137,15 @@ def save_summary(meeting_id: int, summary: str) -> None:
     _set(meeting_id, "summary", summary)
 
 
+def set_segment_speaker(meeting_id: int, index: int, name: str) -> None:
+    """Override the speaker on one line. An empty name clears the override."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE segments SET speaker_name = ? WHERE meeting_id = ? AND idx = ?",
+            (name, meeting_id, index),
+        )
+
+
 def save_speakers(meeting_id: int, speaker_names: dict) -> None:
     _set(
         meeting_id,
@@ -180,7 +199,7 @@ def get_meeting(meeting_id: int) -> dict | None:
         meeting["segments"] = [
             dict(r)
             for r in conn.execute(
-                "SELECT idx, at, speaker, text FROM segments"
+                "SELECT idx, at, speaker, text, speaker_name FROM segments"
                 " WHERE meeting_id = ? ORDER BY idx",
                 (meeting_id,),
             ).fetchall()

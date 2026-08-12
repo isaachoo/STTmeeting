@@ -135,6 +135,8 @@ def index():
     return render_template(
         "index.html",
         missing_keys=config.missing_keys(),
+        providers=config.STT_PROVIDER_CHOICES,
+        default_provider=config.STT_PROVIDER,
         language=config.DEEPGRAM_LANGUAGE,
         models=", ".join(config.DEEPGRAM_MODELS),
         web_search=bool(config.TAVILY_API_KEY),
@@ -295,6 +297,8 @@ def _handle_event(client: Client, raw: str) -> None:
             _session.set_user_notes((data.get("text") or "")[:100_000])
     elif event == "name_speaker":
         _name_speaker(data)
+    elif event == "name_segment":
+        _name_segment(data)
     elif event == "speaker_suggestion":
         if _session is not None:
             _session.apply_speaker_suggestion(bool(data.get("accept")))
@@ -302,6 +306,17 @@ def _handle_event(client: Client, raw: str) -> None:
         client.send("snapshot", _snapshot())
     else:
         log.warning("unknown event %r", event)
+
+
+def _name_segment(data: dict) -> None:
+    session = _session
+    if session is None:
+        return
+    try:
+        index = int(data.get("index"))
+    except (TypeError, ValueError):
+        return
+    session.set_segment_speaker(index, str(data.get("name") or ""))
 
 
 def _name_speaker(data: dict) -> None:
@@ -320,7 +335,8 @@ def _name_speaker(data: dict) -> None:
 def _start_meeting(client: Client, data: dict) -> None:
     global _session
 
-    missing = config.missing_keys()
+    provider = (data.get("provider") or config.STT_PROVIDER).strip().lower()
+    missing = config.missing_keys(provider)
     if missing:
         client.send("error", {"message": f"Missing configuration: {', '.join(missing)}"})
         return
@@ -336,6 +352,7 @@ def _start_meeting(client: Client, data: dict) -> None:
                 emit=_broadcast,
                 language=(data.get("language") or "").strip()[:20],
                 model=(data.get("model") or "").strip()[:40],
+                provider=provider,
             )
         except ValueError as exc:
             client.send("error", {"message": str(exc)})
