@@ -43,6 +43,31 @@ DEEPGRAM_MODELS = [
 ]
 DEEPGRAM_USD_PER_MINUTE = _float("DEEPGRAM_USD_PER_MINUTE", 0.0077)
 
+# Offered in the pre-meeting form. `multi` is Deepgram's code-switching model,
+# which covers English, Spanish, French, German, Hindi, Russian, Portuguese,
+# Japanese, Italian and Dutch -- Cantonese is NOT among them, so it is labelled
+# plainly rather than left to look like a better option for Cantonese.
+DEEPGRAM_LANGUAGE_CHOICES = [
+    {"code": "zh-HK", "label": "Cantonese (zh-HK)"},
+    {"code": "zh-CN", "label": "Mandarin, Simplified (zh-CN)"},
+    {"code": "zh-TW", "label": "Mandarin, Traditional (zh-TW)"},
+    {"code": "en", "label": "English (en)"},
+    {"code": "multi", "label": "Code-switching — English + 9 others, no Cantonese"},
+]
+
+DEEPGRAM_MODEL_CHOICES = [
+    {"code": "nova-3", "label": "nova-3 — newest, supports Cantonese"},
+    {"code": "nova-2", "label": "nova-2 — older fallback"},
+]
+
+
+def models_from(preferred: str) -> list[str]:
+    """Preferred model first, the others after it as automatic fallbacks."""
+    known = [m["code"] for m in DEEPGRAM_MODEL_CHOICES]
+    if preferred not in known:
+        return list(DEEPGRAM_MODELS)
+    return [preferred] + [m for m in known if m != preferred]
+
 # --- LLM ---
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL = os.getenv(

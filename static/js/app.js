@@ -89,6 +89,7 @@ const ui = {
   costTotal: el('cost-total'),
   btnSession: el('btn-session'),
   btnStart: el('btn-start'),
+  btnPause: el('btn-pause'),
   btnStop: el('btn-stop'),
   drawer: el('drawer'),
 
@@ -99,6 +100,9 @@ const ui = {
   inContext: el('in-context'),
   inGlossary: el('in-glossary'),
   inMicMode: el('in-mic-mode'),
+  inMyRole: el('in-my-role'),
+  inLanguage: el('in-language'),
+  inModel: el('in-model'),
   attendees: el('attendees'),
   btnAddAttendee: el('btn-add-attendee'),
 
@@ -106,6 +110,9 @@ const ui = {
   interim: el('interim'),
   autoscroll: el('chk-autoscroll'),
   speakerChips: el('speaker-chips'),
+  filterBar: el('filter-bar'),
+  filterText: el('filter-text'),
+  btnClearFilter: el('btn-clear-filter'),
   suggestion: el('speaker-suggestion'),
 
   advice: el('advice'),
@@ -154,6 +161,8 @@ let speakerNames = {}; // diarisation index (as string) -> name
 let knownSpeakers = new Set();
 let rosterNames = []; // from the pre-meeting attendee list
 let popoverSpeaker = null;
+let paused = false;
+let speakerFilter = new Set();   // empty = show everyone
 
 // ------------------------------------------------------------------ utilities
 
@@ -282,6 +291,7 @@ function collectBrief() {
     title: ui.inTitle.value.trim(),
     agenda: ui.inAgenda.value.trim(),
     my_goal: ui.inGoal.value.trim(),
+    my_role: ui.inMyRole.value.trim(),
     context: ui.inContext.value.trim(),
     attendees,
     glossary: ui.inGlossary.value
@@ -296,6 +306,7 @@ function fillBrief(brief) {
   ui.inTitle.value = brief.title || '';
   ui.inAgenda.value = brief.agenda || '';
   ui.inGoal.value = brief.my_goal || '';
+  ui.inMyRole.value = brief.my_role || '';
   ui.inContext.value = brief.context || '';
   ui.inGlossary.value = (brief.glossary || []).join(', ');
   ui.attendees.innerHTML = '';
@@ -370,7 +381,15 @@ ui.btnStart.addEventListener('click', async () => {
     const brief = collectBrief();
     const sampleRate = await startCapture();
     log(`microphone open at ${sampleRate} Hz`);
-    socket.emit('start_meeting', { brief, sample_rate: sampleRate });
+    socket.emit('start_meeting', {
+      brief,
+      sample_rate: sampleRate,
+      language: ui.inLanguage.value,
+      model: ui.inModel.value,
+    });
+    // Remember the choice for next time.
+    localStorage.setItem('stt_language', ui.inLanguage.value);
+    localStorage.setItem('stt_model', ui.inModel.value);
   } catch (err) {
     stopCapture();
     ui.btnStart.disabled = false;
@@ -378,6 +397,37 @@ ui.btnStart.addEventListener('click', async () => {
     log(`could not open the microphone: ${err.message}`, true);
   }
 });
+
+ui.btnPause.addEventListener('click', () => {
+  // Optimistic locally so the button responds instantly; the server's `paused`
+  // event is the authority and will correct this if it disagrees.
+  setPaused(!paused);
+  socket.emit('pause', { paused });
+});
+
+function setPaused(next) {
+  paused = next;
+  ui.btnPause.textContent = paused ? 'Resume' : 'Pause';
+  ui.btnPause.classList.toggle('primary', paused);
+  // Stop feeding the socket. The worklet keeps running, so resuming is instant
+  // and does not ask for the microphone again.
+  streaming = running && !paused && !!workletNode;
+  if (paused) {
+    ui.interim.textContent = '';
+    ui.connDot.classList.remove('listening');
+  }
+}
+
+function addPauseMarker(payload) {
+  clearIfEmpty(ui.transcript);
+  const marker = document.createElement('p');
+  marker.className = 'pause-marker';
+  marker.textContent = payload.paused
+    ? `⏸ paused at ${clockFromSeconds(payload.at || 0)}`
+    : `▶ resumed at ${clockFromSeconds(payload.at || 0)}`;
+  ui.transcript.append(marker);
+  if (ui.autoscroll.checked) ui.transcript.scrollTop = ui.transcript.scrollHeight;
+}
 
 ui.btnStop.addEventListener('click', () => {
   ui.btnStop.disabled = true;
@@ -471,14 +521,75 @@ function renderSpeakerChips() {
   ui.speakerChips.innerHTML = '';
   [...knownSpeakers].sort((a, b) => a - b).forEach((speaker) => {
     const named = speakerNames[String(speaker)];
-    const chip = document.createElement('button');
-    chip.className = `chip-speaker s${speaker % 4}${named ? '' : ' unnamed'}`;
-    chip.textContent = named || `S${speaker + 1} — name?`;
-    chip.title = 'Click to name this voice';
-    chip.addEventListener('click', (event) => openPopover(speaker, event.currentTarget));
+    const chip = document.createElement('span');
+    const active = speakerFilter.has(speaker);
+    chip.className = `chip-speaker s${speaker % 4}${named ? '' : ' unnamed'}`
+      + (active ? ' active' : '')
+      + (speakerFilter.size && !active ? ' dimmed' : '');
+
+    // The label filters; the pencil renames. Two jobs on one chip needs two
+    // targets, or every rename starts with an accidental filter.
+    const label = document.createElement('button');
+    label.className = 'chip-label';
+    label.textContent = named || `S${speaker + 1}`;
+    label.title = 'Click to show only this speaker';
+    label.addEventListener('click', () => toggleSpeakerFilter(speaker));
+
+    const rename = document.createElement('button');
+    rename.className = 'chip-rename';
+    rename.textContent = named ? '✎' : '✎ name';
+    rename.title = 'Name this voice';
+    rename.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openPopover(speaker, chip);
+    });
+
+    chip.append(label, rename);
     ui.speakerChips.append(chip);
   });
 }
+
+/* Filtering is a VIEW ONLY. The server keeps sending every line and the copilot
+ * keeps seeing the whole conversation -- otherwise the advice would quietly
+ * degrade whenever the screen was filtered. */
+function toggleSpeakerFilter(speaker) {
+  if (speakerFilter.has(speaker)) speakerFilter.delete(speaker);
+  else speakerFilter.add(speaker);
+  applySpeakerFilter();
+  renderSpeakerChips();
+}
+
+function clearSpeakerFilter() {
+  speakerFilter.clear();
+  applySpeakerFilter();
+  renderSpeakerChips();
+}
+
+function lineIsVisible(speaker) {
+  if (!speakerFilter.size) return true;
+  return speaker !== '' && speakerFilter.has(Number(speaker));
+}
+
+function applySpeakerFilter() {
+  ui.transcript.querySelectorAll('.line').forEach((line) => {
+    line.classList.toggle('hidden-by-filter', !lineIsVisible(line.dataset.speaker));
+  });
+  ui.transcript.querySelectorAll('.pause-marker').forEach((marker) => {
+    marker.classList.toggle('hidden-by-filter', speakerFilter.size > 0);
+  });
+
+  if (!speakerFilter.size) {
+    ui.filterBar.hidden = true;
+    return;
+  }
+  const names = [...speakerFilter].sort((a, b) => a - b).map(labelFor).join(', ');
+  const shown = ui.transcript.querySelectorAll('.line:not(.hidden-by-filter)').length;
+  ui.filterText.textContent = `Showing ${shown} line${shown === 1 ? '' : 's'} from ${names}`
+    + ' — the copilot still sees everything';
+  ui.filterBar.hidden = false;
+}
+
+ui.btnClearFilter.addEventListener('click', clearSpeakerFilter);
 
 function relabelTranscript() {
   ui.transcript.querySelectorAll('.line').forEach((line) => {
@@ -611,6 +722,7 @@ function addSegment(seg) {
   at.textContent = clockFromSeconds(seg.at || 0);
 
   line.append(who, said, at);
+  if (!lineIsVisible(line.dataset.speaker)) line.classList.add('hidden-by-filter');
   ui.transcript.append(line);
 
   if (seg.speaker !== null && seg.speaker !== undefined && !knownSpeakers.has(seg.speaker)) {
@@ -888,10 +1000,12 @@ function setRunning(isRunning) {
   running = isRunning;
   ui.btnStart.hidden = isRunning;
   ui.btnStart.disabled = isRunning;
+  ui.btnPause.hidden = !isRunning;
   ui.btnStop.hidden = !isRunning;
   ui.btnStop.disabled = !isRunning;
   ui.setup.hidden = isRunning;
-  streaming = isRunning && !!workletNode;
+  if (!isRunning) setPaused(false);
+  streaming = isRunning && !paused && !!workletNode;
 }
 
 // ---------------------------------------------------------------- socket wiring
@@ -919,7 +1033,10 @@ socket.on('snapshot', (snap) => {
   meetingId = snap.meeting_id;
   speakerNames = snap.speaker_names || {};
   knownSpeakers = new Set();
+  speakerFilter.clear();
+  ui.filterBar.hidden = true;
   fillBrief(snap.brief);
+  if (snap.language) ui.inLanguage.value = snap.language;
 
   ui.transcript.innerHTML = '';
   (snap.segments || []).forEach(addSegment);
@@ -961,6 +1078,7 @@ socket.on('snapshot', (snap) => {
     // (keep sending audio) versus a reloaded tab (the mic went with the old
     // page, so the meeting continues on the server but deaf to this one).
     setRunning(true);
+    setPaused(!!snap.paused);
     if (workletNode) {
       ui.statusText.textContent = 'meeting running';
       log('socket reconnected; still sending audio');
@@ -981,6 +1099,9 @@ socket.on('meeting_started', (snap) => {
   startedAtMs = Date.now();
   speakerNames = {};
   knownSpeakers = new Set();
+  speakerFilter.clear();
+  ui.filterBar.hidden = true;
+  setPaused(false);
   renderSpeakerChips();
   ui.transcript.innerHTML = '<p class="empty">Listening…</p>';
   ui.advice.innerHTML = '<p class="empty">No suggestions yet.</p>';
@@ -1030,6 +1151,14 @@ socket.on('speakers', (payload) => {
   speakerNames = payload.speaker_names || {};
   renderSpeakerChips();
   relabelTranscript();
+  applySpeakerFilter();
+});
+
+socket.on('paused', (payload) => {
+  setPaused(!!payload.paused);
+  addPauseMarker(payload);
+  ui.statusText.textContent = payload.paused ? 'paused — microphone muted' : 'listening';
+  log(payload.paused ? 'paused; no audio is being sent or billed' : 'resumed');
 });
 
 socket.on('speaker_suggestion', renderSuggestion);
@@ -1052,3 +1181,9 @@ window.addEventListener('beforeunload', () => {
 
 // Start with one empty attendee row so the field is obviously fillable.
 addAttendeeRow();
+
+// Restore the language/model chosen last time.
+const savedLanguage = localStorage.getItem('stt_language');
+const savedModel = localStorage.getItem('stt_model');
+if (savedLanguage) ui.inLanguage.value = savedLanguage;
+if (savedModel) ui.inModel.value = savedModel;

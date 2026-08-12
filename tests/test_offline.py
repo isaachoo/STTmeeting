@@ -282,7 +282,24 @@ class TestBrief(unittest.TestCase):
 
     def test_render_omits_empty_sections(self):
         rendered = Brief(title="Just a title").render()
-        self.assertEqual(rendered, "Meeting: Just a title")
+        self.assertIn("Meeting: Just a title", rendered)
+        for absent in ("Agenda:", "Background:", "In the room:"):
+            self.assertNotIn(absent, rendered)
+
+    def test_my_role_reaches_the_prompt(self):
+        brief = Brief(my_role="IT manager asking finance for two headcount")
+        self.assertIn("IT manager asking finance", brief.render())
+        self.assertIn("The user's role", brief.render())
+
+    def test_role_falls_back_to_the_roster_then_to_general(self):
+        self.assertEqual(
+            Brief(my_role="chairing").role_line(), "chairing"
+        )
+        from_roster = Brief(attendees=[Attendee(name="Isaac", role="CFO", is_me=True)])
+        self.assertEqual(from_roster.role_line(), "CFO")
+        # No role anywhere still has to say something usable to the model.
+        self.assertIn("general participant", Brief().role_line())
+        self.assertIn("The user's role", Brief().render())
 
     def test_round_trips_through_a_dict(self):
         brief = sample_brief()
@@ -909,6 +926,27 @@ class TestDeepgramKeyterms(unittest.TestCase):
 # ------------------------------------------------------------------ storage
 
 
+class TestSTTChoices(unittest.TestCase):
+    """The language/model picker offered in the pre-meeting form."""
+
+    def test_preferred_model_leads_and_the_rest_stay_as_fallbacks(self):
+        self.assertEqual(config.models_from("nova-2")[0], "nova-2")
+        self.assertIn("nova-3", config.models_from("nova-2"))
+        self.assertEqual(config.models_from("nova-3")[0], "nova-3")
+
+    def test_an_unknown_model_falls_back_to_the_configured_list(self):
+        self.assertEqual(config.models_from("not-a-model"), list(config.DEEPGRAM_MODELS))
+        self.assertEqual(config.models_from(""), list(config.DEEPGRAM_MODELS))
+
+    def test_cantonese_is_offered_and_multi_is_labelled_as_excluding_it(self):
+        codes = [c["code"] for c in config.DEEPGRAM_LANGUAGE_CHOICES]
+        self.assertIn("zh-HK", codes)
+        # Deepgram's code-switching set does not include Cantonese, so the
+        # option must say so rather than look like a better choice.
+        multi = next(c for c in config.DEEPGRAM_LANGUAGE_CHOICES if c["code"] == "multi")
+        self.assertIn("no Cantonese", multi["label"])
+
+
 class TestStorage(unittest.TestCase):
     def setUp(self):
         db.init()
@@ -1148,6 +1186,52 @@ class TestSessionCostAndSnapshot(ConfigGuard):
         self.assertTrue(snap["running"])
         self.assertEqual(snap["brief"]["title"], "Q3 planning")
         self.assertEqual(snap["segments"][0]["speaker_label"], "S2")
+
+    def test_pausing_stops_audio_reaching_the_transcriber(self):
+        """Cost follows from this: audio_seconds counts bytes actually sent on to
+        Deepgram, so audio that never enters the queue is never billed."""
+        queue = self.session.stt._audio
+
+        self.session.feed_audio(b"\x00\x01" * 1000)
+        self.assertEqual(queue.qsize(), 1)
+
+        self.session.set_paused(True)
+        self.assertTrue(self.session.paused)
+        self.session.feed_audio(b"\x00\x01" * 1000)
+        self.assertEqual(queue.qsize(), 1, "paused audio must be dropped, not queued")
+
+        self.session.set_paused(False)
+        self.session.feed_audio(b"\x00\x01" * 1000)
+        self.assertEqual(queue.qsize(), 2, "resuming must start feeding again")
+
+    def test_pause_is_announced_and_recorded(self):
+        self.session.set_paused(True)
+        payload = self.emitter.of("paused")[-1]
+        self.assertTrue(payload["paused"])
+        self.assertIn("at", payload)
+
+        self.session.set_paused(False)
+        self.assertFalse(self.emitter.of("paused")[-1]["paused"])
+
+        kinds = [e["kind"] for e in db.get_meeting(self.session.meeting_id)["events"]]
+        self.assertEqual(kinds.count("pause"), 2, "both edges belong in the record")
+
+    def test_pausing_twice_changes_nothing(self):
+        self.session.set_paused(True)
+        self.session.set_paused(True)
+        self.assertEqual(len(self.emitter.of("paused")), 1)
+
+    def test_a_stopped_meeting_cannot_be_paused(self):
+        self.session.stopped = True
+        self.session.set_paused(True)
+        self.assertFalse(self.session.paused)
+        self.assertEqual(self.emitter.of("paused"), [])
+
+    def test_snapshot_reports_pause_state_and_language(self):
+        self.session.set_paused(True)
+        snap = self.session.snapshot()
+        self.assertTrue(snap["paused"])
+        self.assertEqual(snap["language"], config.DEEPGRAM_LANGUAGE)
 
     def test_feeding_audio_after_stop_is_ignored(self):
         self.session.stopped = True

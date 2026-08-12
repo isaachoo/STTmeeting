@@ -34,6 +34,7 @@ class Brief:
     context: str = ""
     agenda: str = ""
     my_goal: str = ""
+    my_role: str = ""
     attendees: list[Attendee] = field(default_factory=list)
     glossary: list[str] = field(default_factory=list)
 
@@ -71,6 +72,7 @@ class Brief:
             context=_text(data.get("context"), 6000),
             agenda=_text(data.get("agenda"), 4000),
             my_goal=_text(data.get("my_goal"), 2000),
+            my_role=_text(data.get("my_role"), 500),
             attendees=attendees,
             glossary=glossary,
         )
@@ -86,6 +88,7 @@ class Brief:
             "context": self.context,
             "agenda": self.agenda,
             "my_goal": self.my_goal,
+            "my_role": self.my_role,
             "attendees": [a.as_dict() for a in self.attendees],
             "glossary": list(self.glossary),
         }
@@ -109,8 +112,19 @@ class Brief:
 
     def is_empty(self) -> bool:
         return not any(
-            (self.context, self.agenda, self.my_goal, self.attendees, self.glossary)
+            (self.context, self.agenda, self.my_goal, self.my_role,
+             self.attendees, self.glossary)
         )
+
+    def role_line(self) -> str:
+        """How the copilot should think of the user. Everything it suggests is
+        judged from this seat, so an empty role must still say something."""
+        if self.my_role:
+            return self.my_role
+        me = self.me
+        if me and me.role:
+            return me.role
+        return "a general participant, with no particular stake stated"
 
     def render(self) -> str:
         """The brief as prompt text. Sections are omitted when empty."""
@@ -122,6 +136,7 @@ class Brief:
             parts.append(f"In the room:\n{people}")
         if self.agenda:
             parts.append(f"Agenda:\n{self.agenda}")
+        parts.append(f"The user's role in this meeting:\n{self.role_line()}")
         if self.my_goal:
             parts.append(f"What the user wants out of this meeting:\n{self.my_goal}")
         if self.context:

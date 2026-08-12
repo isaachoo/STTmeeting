@@ -23,6 +23,7 @@
     <span id="cost-total" class="mono small cost-pill" title="estimated cost so far">$0.0000</span>
     <button id="btn-session" class="ghost small">Session</button>
     <button id="btn-start" class="primary">Start meeting</button>
+    <button id="btn-pause" hidden>Pause</button>
     <button id="btn-stop" class="danger" hidden>Stop</button>
   </div>
 </header>
@@ -102,6 +103,32 @@
   </div>
 
   <div class="setup-grid">
+    <label class="span2">
+      My role in this meeting
+      <span class="muted small">— advice is judged from this seat. Leave blank for general.</span>
+      <input id="in-my-role" type="text" placeholder="IT manager asking finance to approve two headcount">
+    </label>
+    <div class="stt-row">
+      <label>
+        Language
+        <select id="in-language">
+          {% for lang in languages %}
+          <option value="{{ lang.code }}" {% if lang.code == default_language %}selected{% endif %}>{{ lang.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Model
+        <select id="in-model">
+          {% for m in stt_models %}
+          <option value="{{ m.code }}" {% if m.code == default_model %}selected{% endif %}>{{ m.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <div class="setup-grid">
     <label>
       Agenda
       <textarea id="in-agenda" rows="3" placeholder="1. Q3 budget&#10;2. Headcount&#10;3. Falcon timeline"></textarea>
@@ -144,6 +171,10 @@
         <span id="speaker-chips" class="chips"></span>
         <label class="toggle small"><input type="checkbox" id="chk-autoscroll" checked> follow</label>
       </div>
+    </div>
+    <div id="filter-bar" class="filter-bar" hidden>
+      <span id="filter-text"></span>
+      <button id="btn-clear-filter" class="ghost small">Show everyone</button>
     </div>
     <div id="speaker-suggestion" class="suggestion" hidden></div>
     <div class="panel-body" id="transcript">

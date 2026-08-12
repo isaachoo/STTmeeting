@@ -140,6 +140,10 @@ def index():
         web_search=bool(config.TAVILY_API_KEY),
         attendee_enabled=config.ATTENDEE_ENABLED,
         attendee_mode=config.ATTENDEE_MODE,
+        languages=config.DEEPGRAM_LANGUAGE_CHOICES,
+        stt_models=config.DEEPGRAM_MODEL_CHOICES,
+        default_language=config.DEEPGRAM_LANGUAGE,
+        default_model=config.DEEPGRAM_MODELS[0] if config.DEEPGRAM_MODELS else "nova-3",
     )
 
 
@@ -278,6 +282,9 @@ def _handle_event(client: Client, raw: str) -> None:
         _start_meeting(client, data)
     elif event == "stop_meeting":
         _stop_meeting()
+    elif event == "pause":
+        if _session is not None:
+            _session.set_paused(bool(data.get("paused")))
     elif event == "ask":
         session = _session
         question = (data.get("question") or "").strip()
@@ -327,6 +334,8 @@ def _start_meeting(client: Client, data: dict) -> None:
                 brief=Brief.from_payload(data.get("brief")),
                 sample_rate=data.get("sample_rate"),
                 emit=_broadcast,
+                language=(data.get("language") or "").strip()[:20],
+                model=(data.get("model") or "").strip()[:40],
             )
         except ValueError as exc:
             client.send("error", {"message": str(exc)})

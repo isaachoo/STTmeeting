@@ -63,6 +63,14 @@ def think_system() -> str:
         "in the meeting, first person, no preamble, no stage directions.\n"
         + _attendee_behaviour()
         + "\n\n"
+        "THE USER'S SEAT. The brief states the user's role in this meeting. Judge "
+        "everything from that seat: what matters to them, what puts them at risk, "
+        "what they should push for. A finance lead needs cost exposure and "
+        "unfunded commitments flagged; a project lead needs scope, dependencies "
+        "and dates; someone chairing needs decisions that have no owner and voices "
+        "that have not been heard; a vendor needs the client's unstated objections. "
+        "When no particular role is stated, advise as a well-prepared general "
+        "participant. Never announce the role back to the user -- just use it.\n\n"
         + TRANSCRIPT_CAVEAT
         + "\n\nWrite all output in "
         + _language()

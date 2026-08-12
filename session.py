@@ -25,10 +25,17 @@ MAX_SAMPLE_RATE = 48000
 
 
 class MeetingSession:
-    def __init__(self, brief: Brief, sample_rate: int, emit):
+    def __init__(self, brief: Brief, sample_rate: int, emit,
+                 language: str | None = None, model: str | None = None):
         self.sample_rate = _validate_sample_rate(sample_rate)
         self._emit = emit
         self._lock = threading.Lock()
+        self.language = (language or config.DEEPGRAM_LANGUAGE).strip()
+        models = config.models_from((model or "").strip())
+        # Paused means the microphone is muted, not that the meeting ended: the
+        # Deepgram socket stays open on keepalives, so no audio is billed and
+        # resuming needs no reconnect and no second microphone prompt.
+        self._paused = threading.Event()
 
         self.stt_status = {"state": "starting", "detail": ""}
         self.cards: list[dict] = []  # copilot panel: advice + answers
@@ -42,8 +49,8 @@ class MeetingSession:
         self.meeting_id = db.create_meeting(
             title=brief.title,
             brief=brief.as_dict(),
-            language=config.DEEPGRAM_LANGUAGE,
-            stt_model=config.DEEPGRAM_MODELS[0] if config.DEEPGRAM_MODELS else "",
+            language=self.language,
+            stt_model=models[0] if models else "",
         )
         self.state = MeetingState(meeting_id=self.meeting_id, brief=brief)
 
@@ -55,8 +62,8 @@ class MeetingSession:
         self.stt = DeepgramLiveSTT(
             api_key=config.DEEPGRAM_API_KEY,
             sample_rate=self.sample_rate,
-            language=config.DEEPGRAM_LANGUAGE,
-            models=config.DEEPGRAM_MODELS,
+            language=self.language,
+            models=models,
             keyterms=brief.keyterms() if config.DEEPGRAM_KEYTERMS else [],
             on_interim=self._on_interim,
             on_utterance=self._on_utterance,
@@ -83,13 +90,35 @@ class MeetingSession:
     def stopped_event(self) -> threading.Event:
         return self._stopped
 
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
+    def set_paused(self, paused: bool) -> None:
+        """Mute or unmute the microphone without ending the meeting."""
+        if self.stopped or paused == self.paused:
+            return
+        if paused:
+            self._paused.set()
+        else:
+            self._paused.clear()
+            # Anything Deepgram was still holding belongs to the old segment.
+            self.interim = ""
+            self._emit("interim", {"text": ""})
+
+        payload = {"paused": paused, "at": round(self.state.elapsed(), 1)}
+        db.add_event(self.meeting_id, "pause", payload)
+        self._emit("paused", payload)
+
     # ----------------------------------------------------------------- control
 
     def start(self) -> None:
         self.stt.start()
 
     def feed_audio(self, chunk: bytes) -> None:
-        if self.stopped:
+        # Dropping the audio here rather than in the browser means the cost
+        # readout stops too: audio_seconds counts bytes actually sent onward.
+        if self.stopped or self.paused:
             return
         self.stt.send_audio(chunk)
         if self._wav is not None:
@@ -240,6 +269,8 @@ class MeetingSession:
                 "brief": self.state.brief.as_dict(),
                 "title": self.state.brief.title,
                 "running": not self.stopped,
+                "paused": self.paused,
+                "language": self.language,
                 "status": self.stt_status,
                 "error": self.error,
                 "interim": self.interim,

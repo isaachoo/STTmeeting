@@ -360,10 +360,13 @@ class LiveServerCase(unittest.TestCase):
             session.engine.close(wait=False)
         self.app_module._session = None
 
-    def start_meeting(self, brief=None, rate=16000):
-        self.browser.emit(
-            "start_meeting", {"brief": brief if brief is not None else BRIEF, "sample_rate": rate}
-        )
+    def start_meeting(self, brief=None, rate=16000, language=None, model=None):
+        payload = {"brief": brief if brief is not None else BRIEF, "sample_rate": rate}
+        if language:
+            payload["language"] = language
+        if model:
+            payload["model"] = model
+        self.browser.emit("start_meeting", payload)
         self.browser.wait("meeting_started")
         self.assertTrue(wait_for(lambda: FakeWebSocketApp.latest is not None))
         ws = FakeWebSocketApp.latest
@@ -507,6 +510,67 @@ class TestAttendeeOverTheWire(LiveServerCase):
         answers = self.browser.wait("answer")
         self.assertTrue(answers[0]["from_user"])
         self.assertEqual(self.browser.got("attendee"), [], "private answers stay private")
+
+
+class TestPauseAndSTTChoice(LiveServerCase):
+    def test_pause_stops_audio_reaching_deepgram_then_resumes(self):
+        ws = self.start_meeting()
+        chunk = b"\x11\x22" * 2048
+
+        self.browser.send_audio(chunk)
+        self.assertTrue(wait_for(lambda: ws.audio_bytes >= len(chunk)))
+
+        self.browser.emit("pause", {"paused": True})
+        paused = self.browser.wait("paused")
+        self.assertTrue(paused[-1]["paused"])
+
+        before = ws.audio_bytes
+        for _ in range(3):
+            self.browser.send_audio(chunk)
+        time.sleep(0.4)
+        self.assertEqual(ws.audio_bytes, before, "paused audio must not be forwarded")
+
+        # The socket stays open through the pause, so resuming needs no reconnect.
+        self.assertFalse(ws._closed.is_set())
+
+        self.browser.emit("pause", {"paused": False})
+        self.assertTrue(wait_for(lambda: len(self.browser.got("paused")) >= 2))
+        self.assertFalse(self.browser.got("paused")[-1]["paused"])
+
+        self.browser.send_audio(chunk)
+        self.assertTrue(wait_for(lambda: ws.audio_bytes > before))
+
+    def test_pause_state_survives_a_reconnect(self):
+        self.start_meeting()
+        self.browser.emit("pause", {"paused": True})
+        self.browser.wait("paused")
+        self.assertTrue(self.browser.request_snapshot()["paused"])
+
+    def test_the_chosen_language_and_model_reach_deepgram(self):
+        ws = self.start_meeting(language="en", model="nova-2")
+        self.assertIn("language=en", ws.url)
+        self.assertIn("model=nova-2", ws.url)
+        self.assertEqual(self.app_module._session.language, "en")
+
+    def test_an_unknown_model_falls_back_instead_of_failing(self):
+        ws = self.start_meeting(model="does-not-exist")
+        self.assertIn("model=nova-3", ws.url)
+
+    def test_the_language_is_stored_with_the_meeting(self):
+        self.start_meeting(language="zh-TW")
+        meeting_id = self.app_module._session.meeting_id
+        self.assertEqual(self.db.get_meeting(meeting_id)["language"], "zh-TW")
+
+    def test_my_role_reaches_the_model(self):
+        brief = dict(BRIEF)
+        brief["my_role"] = "IT manager asking finance to approve two headcount"
+        ws = self.start_meeting(brief=brief)
+        ws.push_utterance("我想爭取多兩個 headcount")
+        self.browser.wait("advice")
+        self.assertTrue(
+            self.llm.saw("IT manager asking finance"),
+            "the user's role must be in the prompt the copilot reasons from",
+        )
 
 
 class TestSpeakerNaming(LiveServerCase):
