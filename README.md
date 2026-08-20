@@ -22,7 +22,9 @@ Stop, it writes the final notes.
 └─────────────────────────────┴─────────────────────────────┘
 ```
 
-Cost, exports and history live in the **Session** drawer in the title bar.
+Cost, exports, API keys and history live in the **Session** drawer in the title
+bar. When the meeting stops, the **review workspace** takes over: search the
+transcript, ask it questions, curate the action items, and generate the minutes.
 
 ## How it works
 
@@ -42,6 +44,40 @@ browser mic ──AudioWorklet──▶ 16-bit PCM over a WebSocket ──▶ Fl
 API keys stay on the server; the browser never sees them. The server owns the
 transcript, so the copilot works on it directly and everything persists to
 SQLite as the meeting happens — a refresh at hour four loses nothing.
+
+## After the meeting: the review workspace
+
+The console records; the review workspace is where you actually work on what was
+said. Press **Review meeting →** when a meeting stops, or open **Session ▸ Past
+meetings** and click **Review** on any meeting you have ever recorded.
+
+Same four-panel shape as the console:
+
+| | |
+|---|---|
+| **Transcript** — search it, filter by speaker, fix who said any line | **Ask the meeting** — questions answered from the transcript, with citations you can click |
+| **Action items** — your list: add, edit, tick off, or have the copilot draft them | **Reports** — minutes, action items, executive summary, follow-up email |
+
+**Read the whole meeting** (top right) is the one thing worth understanding. A
+five-hour transcript does not fit in a prompt, so the copilot reads it once in
+sections and keeps a condensed record with the line numbers attached. That record
+is what reports are written from, and it is cached — reading is paid for once, and
+all four reports plus every question afterwards reuse it. Until you build it,
+questions are answered from the retrieved passages plus the notes taken live,
+which is cheaper but does not see the whole meeting; the page says which you got.
+
+Answers cite transcript lines as `#42`. Click one and it jumps to that line and
+flashes it. Nothing is asserted without a line you can go and check.
+
+**Drafted action items are proposals, not entries.** The copilot suggests owners,
+tasks and dates; you accept them one at a time or all at once. Anything that
+sounded like an intention rather than a commitment is flagged as such. This list
+gets emailed to colleagues — an owner the model inferred rather than heard is the
+mistake nobody catches until it matters.
+
+**Reports are drafts you own.** Every generation is saved as its own version, so
+regenerating never overwrites something you have already edited and sent. Edit in
+place, **Save edits**, then **Copy** or **Download**.
 
 ## Setup
 
@@ -112,6 +148,7 @@ knowing about:
 | `DEEPGRAM_MODELS` | `nova-3,nova-2` | Tried in order; falls back automatically if a model will not accept the language |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v3.2` | The advisor. Cheap and fast matters more than clever here |
 | `OPENROUTER_NOTES_MODEL` | same as above | Set a stronger model if you want better notes |
+| `REVIEW_MODEL` | same as above | The review workspace: reports, questions, reading the transcript. Worth a stronger model — minutes get read by other people |
 | `TAVILY_API_KEY` | unset | Without it the copilot answers from model knowledge and says so |
 | `THINK_MIN_INTERVAL` | `15` | Seconds between think cycles — the main cost dial |
 | `THINK_URGENT_INTERVAL` | `5` | Shorter floor when someone in the room just asked a question |
@@ -184,6 +221,12 @@ tight — it sits in the prefix of every call. Note that the coaching panel and 
 AI attendee come out of one LLM call, not two, so switching the attendee off
 saves nothing.
 
+Afterwards, in the review workspace: reading a five-hour meeting is about 15
+calls, roughly **$0.05–0.15** on DeepSeek V3.2, paid once. Each report after
+that is one call (~$0.01), and each question is one call (~$0.002) because only
+the matching passages are sent, not the transcript. Working through a long
+meeting properly costs less than the transcription of ten minutes of it.
+
 ## Design notes
 
 **One call, two outputs.** The private coaching and the AI attendee's turn come
@@ -227,13 +270,32 @@ case for any STT. The prompts tell the model to read through homophone errors
 and mangled English terms using the brief as context, and never to comment on
 transcript quality.
 
+**Retrieval has no dependencies.** Finding the passages that bear on a question
+is BM25 over character bigrams for the Chinese and whole words for the English —
+no embedding model, no vector database, no second API key. Bigrams because there
+are no spaces to split Cantonese on; single characters are kept too but weighted
+down, which is what lets a question about "budget 加幾多" reach a line that says
+"最多加 50 萬" and shares no bigram with it.
+
+**Line numbers are the contract.** The passages sent to the model, the digest it
+writes, the citations in an answer, and the `#42` you click in the UI are all the
+same numbers. A citation the user can click and land nowhere is worse than no
+citation, so invented numbers are filtered out server-side before an answer is
+returned.
+
+**The digest is honest about gaps.** If a section of the transcript fails to
+read, the digest records which one and says so in the text every report is
+written from, and the next attempt rebuilds rather than treating a partial read
+as done. Reading nine tenths of a meeting and presenting minutes as complete is
+the worst thing this feature could do.
+
 ## Tests
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-122 tests, no network and no API keys needed.
+318 tests, no network and no API keys needed.
 
 `test_offline.py` covers the parts that fail silently in a live meeting: JSON
 coercion around model output, the rate limiting that decides when the copilot
@@ -244,6 +306,12 @@ fallback, the exports, and the cost arithmetic.
 `test_socket_flow.py` boots the real server on a real port and drives it over a
 real WebSocket the way the browser does — binary audio frames in, transcript,
 coaching, attendee turns and exports out — with Deepgram and OpenRouter faked.
+
+`test_review.py` covers the review workspace: retrieval ranking on real
+Cantonese-with-English lines, passages keeping their line numbers, citations
+filtered against what was actually sent, the digest surviving a failed section
+and not being rebuilt when it is already cached, all four report kinds, action
+items, and every endpoint the review page calls.
 
 ## Limits worth being honest about
 

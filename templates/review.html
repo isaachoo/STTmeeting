@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="zh-HK">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if meeting %}{{ meeting.title or 'Meeting ' ~ meeting_id }} — review{% else %}Meeting not found{% endif %}</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%234ec9a0'/></svg>">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/review.css') }}">
+</head>
+<body>
+
+{% if not meeting %}
+<header class="bar">
+  <div class="bar-left"><strong>Review</strong></div>
+  <div class="bar-right"><a class="ghost-link" href="/">← back to the console</a></div>
+</header>
+<section class="setup">
+  <h2>No meeting {{ meeting_id }}</h2>
+  <p class="muted">There is no saved meeting with that number. Open the console, press
+  <strong>Session</strong>, and pick one from <em>Past meetings</em>.</p>
+</section>
+{% else %}
+
+<header class="bar">
+  <div class="bar-left">
+    <a class="ghost-link" href="/" title="back to the live console">←</a>
+    <strong id="r-title">{{ meeting.title or 'Meeting ' ~ meeting_id }}</strong>
+    <span class="muted small" id="r-meta"></span>
+  </div>
+  <div class="bar-right">
+    <span class="muted small" id="r-digest-state">checking…</span>
+    <button id="btn-build-digest" class="ghost small" title="Read the whole transcript once so reports and answers cover all of it">Read the whole meeting</button>
+    <a class="ghost-link small" href="/api/meetings/{{ meeting_id }}/export.md">MD</a>
+    <a class="ghost-link small" href="/api/meetings/{{ meeting_id }}/export.json">JSON</a>
+  </div>
+</header>
+
+<div class="banner" id="r-job" hidden>
+  <span id="r-job-text"></span>
+  <span class="bar-track"><span class="bar-fill" id="r-job-fill"></span></span>
+</div>
+<div class="banner error" id="r-error" hidden></div>
+{% if missing_keys %}
+<div class="banner error">
+  Missing <strong>{{ missing_keys|join(', ') }}</strong> — the copilot side of review
+  needs it. Enter it in the console under <strong>Session</strong>.
+</div>
+{% endif %}
+
+<main class="grid">
+
+  <!-- top left: the transcript, searchable and fixable -->
+  <section class="panel" id="panel-r-transcript">
+    <div class="panel-head">
+      <h2>Transcript</h2>
+      <div class="head-right">
+        <span id="r-speaker-chips" class="chips"></span>
+      </div>
+    </div>
+    <div class="search-row">
+      <input id="r-search" type="search" placeholder="Search the transcript…" autocomplete="off">
+      <span class="muted small" id="r-search-count"></span>
+      <label class="toggle small" title="Hide lines that do not match"><input type="checkbox" id="r-only-matches"> only matches</label>
+    </div>
+    <div class="panel-body" id="r-transcript">
+      <p class="empty">Loading…</p>
+    </div>
+  </section>
+
+  <!-- top right: ask the meeting -->
+  <section class="panel" id="panel-r-chat">
+    <div class="panel-head">
+      <h2>Ask the meeting</h2>
+      <div class="head-right">
+        <span class="muted small" id="r-chat-cost"></span>
+        <button id="btn-clear-chat" class="ghost small">Clear</button>
+      </div>
+    </div>
+    <div class="panel-body" id="r-chat">
+      <p class="empty">
+        Ask anything about what was said — “乜嘢時候 agree 咗個 budget？”, “who
+        objected to the Falcon timeline?”, “what did I commit to?”. Answers cite
+        the transcript lines they came from; click a citation to jump to it.
+      </p>
+    </div>
+    <form id="r-ask-form" class="ask">
+      <input id="r-ask" type="text" placeholder="Ask about this meeting…" autocomplete="off">
+      <button type="submit">Ask</button>
+    </form>
+  </section>
+
+  <!-- bottom left: action items -->
+  <section class="panel" id="panel-r-actions">
+    <div class="panel-head">
+      <h2>Action items</h2>
+      <div class="head-right">
+        <span class="muted small" id="r-actions-count"></span>
+        <button id="btn-draft-actions" class="ghost small" title="Let the copilot propose items from the meeting">Draft from meeting</button>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div id="r-proposals" hidden>
+        <div class="proposals-head">
+          <strong class="small">Proposed — check each one before you accept it</strong>
+          <span>
+            <button id="btn-accept-all" class="ghost small">Accept all</button>
+            <button id="btn-dismiss-proposals" class="ghost small">Dismiss</button>
+          </span>
+        </div>
+        <div id="r-proposal-list"></div>
+      </div>
+      <table class="actions-table">
+        <thead>
+          <tr><th></th><th>Owner</th><th>Task</th><th>Due</th><th></th></tr>
+        </thead>
+        <tbody id="r-actions"></tbody>
+      </table>
+      <form id="r-add-action" class="add-action">
+        <input id="r-new-who" type="text" placeholder="Owner">
+        <input id="r-new-what" type="text" placeholder="What needs doing" required>
+        <input id="r-new-due" type="text" placeholder="Due">
+        <button type="submit" class="small">Add</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- bottom right: reports -->
+  <section class="panel" id="panel-r-reports">
+    <div class="panel-head">
+      <h2>Reports</h2>
+      <span class="muted small">{{ review_model }}</span>
+    </div>
+    <div class="panel-body">
+      <div class="report-kinds">
+        {% for kind in report_kinds %}
+        <button class="ghost small kind" data-kind="{{ kind.code }}" title="{{ kind.hint }}">{{ kind.label }}</button>
+        {% endfor %}
+      </div>
+      <div id="r-report-list" class="report-list"></div>
+      <div id="r-report-view" hidden>
+        <div class="report-view-head">
+          <strong id="r-report-title" class="small"></strong>
+          <span>
+            <button id="btn-report-copy" class="ghost small">Copy</button>
+            <a id="btn-report-download" class="ghost-link small" href="#">Download</a>
+            <button id="btn-report-save" class="primary small">Save edits</button>
+            <button id="btn-report-delete" class="ghost small">Delete</button>
+          </span>
+        </div>
+        <textarea id="r-report-body" spellcheck="false"></textarea>
+        <div class="muted small" id="r-report-hint"></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- Naming a voice or a single line, same popover as the live console. -->
+<div id="r-popover" class="popover" hidden>
+  <div class="popover-title">Who is <span id="r-pop-label"></span>?</div>
+  <div class="popover-scope muted small" id="r-pop-scope"></div>
+  <div id="r-pop-roster" class="pop-roster"></div>
+  <form id="r-pop-form">
+    <input id="r-pop-name" type="text" placeholder="or type a name" autocomplete="off">
+    <button type="submit" class="primary small">Set</button>
+  </form>
+  <button id="r-pop-clear" class="ghost small">Clear name</button>
+</div>
+
+<script>window.MEETING_ID = {{ meeting_id }};</script>
+<script src="{{ url_for('static', filename='js/review.js') }}"></script>
+{% endif %}
+
+</body>
+</html>

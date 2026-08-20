@@ -339,6 +339,309 @@ def speaker_guess_messages(
     ]
 
 
+# ------------------------------------------------------- review: the digest
+
+
+def digest_system() -> str:
+    return (
+        "You are reading one section of a meeting transcript, in order to build a "
+        "condensed record that later work -- minutes, a summary, a follow-up email "
+        "-- will be written from. You are NOT writing the final document. Your job "
+        "is to lose as little of substance as possible while cutting the length.\n\n"
+        + TRANSCRIPT_CAVEAT
+        + "\n\nWrite all output in "
+        + _language()
+        + ".\n\n"
+        "Return a single JSON object with exactly these keys:\n\n"
+        "{\n"
+        '  "topics": array of {"topic": string, "what_happened": string,\n'
+        '                      "lines": array of integers},\n'
+        '  "decisions": array of {"decision": string, "by": string, "lines": array of integers},\n'
+        '  "actions": array of {"who": string, "what": string, "due": string,\n'
+        '                       "lines": array of integers},\n'
+        '  "questions": array of {"question": string, "asked_by": string,\n'
+        '                         "answered": boolean, "lines": array of integers},\n'
+        '  "facts": array of {"fact": string, "lines": array of integers},\n'
+        '  "quotes": array of {"who": string, "said": string, "line": integer}\n'
+        "}\n\n"
+        "Rules:\n"
+        "- Every transcript line is numbered like [#42]. For each entry, put the "
+        'line numbers it came from in "lines". This is how a reader gets back to '
+        "the words that were actually spoken, so never omit them and never invent "
+        "a number you were not given.\n"
+        '- "what_happened": two or three sentences on how the discussion went, '
+        "including who took which position.\n"
+        '- "facts": numbers, dates, names, amounts, system names, and commitments '
+        "stated out loud. Record them exactly as said. These are the details a "
+        "summary written later cannot recover if you drop them.\n"
+        '- "quotes": at most three lines that would be worth quoting verbatim -- '
+        "a firm commitment, a clear refusal, a decisive statement. Skip if none.\n"
+        '- "who"/"by"/"asked_by": the speaker label from the transcript. Use "" '
+        "when you cannot tell.\n"
+        "- Nothing invented. If this section is small talk with nothing in it, "
+        "return empty arrays. That is a correct answer, not a failure."
+    )
+
+
+def digest_messages(brief_text: str, roster: str, chunk: str, position: str) -> list[dict]:
+    sections = [
+        _context_block(brief_text, roster, ""),
+        f"# Where this section sits\n{position}",
+        "# Transcript section\n" + chunk,
+        "Return the JSON object now.",
+    ]
+    return [
+        {"role": "system", "content": digest_system()},
+        {"role": "user", "content": "\n\n".join(p for p in sections if p)},
+    ]
+
+
+# ------------------------------------------------- review: ask the meeting
+
+
+def review_qa_system() -> str:
+    return (
+        "You answer questions about a meeting that has already finished, for "
+        "someone who was in it. You are given a condensed record of the whole "
+        "meeting and the transcript passages that best match the question.\n\n"
+        + TRANSCRIPT_CAVEAT
+        + "\n\nWrite in "
+        + _language()
+        + ".\n\n"
+        "Rules:\n"
+        "- Answer from the meeting, not from general knowledge. This is a record "
+        "of what specific people said on a specific day; an answer that is true "
+        "in general but was not said is worse than useless here.\n"
+        "- Cite the transcript. Every factual claim gets the line number it came "
+        "from, written as [#42], or several: [#42] [#43]. Only cite numbers that "
+        "appear in the material you were given.\n"
+        "- If the passages do not contain the answer, say so plainly and say what "
+        "the transcript does cover on that subject. Do not fill the gap with a "
+        "guess. The user will act on this.\n"
+        "- If the transcript is ambiguous on the point -- two people said "
+        "different things, or the recognition is too garbled to be sure -- say "
+        "which and let the user judge.\n"
+        "- Be direct and short. Lead with the answer, then the supporting detail. "
+        "No preamble, no restating the question."
+    )
+
+
+def review_qa_messages(
+    question: str,
+    brief_text: str,
+    roster: str,
+    digest_text: str,
+    passages: str,
+    history: list[dict],
+) -> list[dict]:
+    sections = [_context_block(brief_text, roster, "")]
+    if digest_text:
+        sections.append("# Condensed record of the whole meeting\n" + digest_text)
+    sections.append(
+        "# Transcript passages matching the question\n"
+        + (passages or "(nothing in the transcript matched this question)")
+    )
+    sections.append("# Question\n" + question)
+    messages = [{"role": "system", "content": review_qa_system()}]
+    # Earlier turns go in as real conversation turns so follow-ups like "and who
+    # objected to that?" resolve against what was just answered.
+    for turn in history[-6:]:
+        if turn.get("question"):
+            messages.append({"role": "user", "content": turn["question"]})
+        if turn.get("answer"):
+            messages.append({"role": "assistant", "content": turn["answer"]})
+    messages.append({"role": "user", "content": "\n\n".join(p for p in sections if p)})
+    return messages
+
+
+# ------------------------------------------------------- review: action items
+
+
+def action_draft_system() -> str:
+    return (
+        "You extract action items from a finished meeting. Someone will send this "
+        "list to the people in the room, so a wrong owner or an invented deadline "
+        "causes real trouble.\n\n"
+        + TRANSCRIPT_CAVEAT
+        + "\n\nWrite all output in "
+        + _language()
+        + ", except names, which stay as they are.\n\n"
+        "Return a single JSON object:\n\n"
+        "{\n"
+        '  "actions": array of {"who": string, "what": string, "due": string,\n'
+        '                       "lines": array of integers, "confidence": "high" | "low"}\n'
+        "}\n\n"
+        "Rules:\n"
+        '- "what" is one concrete task, phrased so the owner knows what to do: a '
+        'verb and an object. Not "discuss the budget" if what was actually agreed '
+        'was "send the revised budget to Alan".\n'
+        '- "who": the name of the person who took it on. Use "unassigned" when '
+        "nobody did. Never assign work to someone because it sounds like their "
+        "area -- only because they accepted it or were given it.\n"
+        '- "due": only a date or timeframe that was actually said ("下星期五", '
+        '"end of Q3"). Empty string otherwise. Never invent one.\n'
+        '- "lines": the transcript line numbers this came from, so the user can '
+        "check it.\n"
+        '- "confidence": "low" when it reads more like an intention than a '
+        "commitment, so the user can look before sending.\n"
+        "- Do not repeat items the user already has -- you will be shown their "
+        "current list. Add only what is missing.\n"
+        "- An empty array is the right answer for a meeting that agreed nothing."
+    )
+
+
+def action_draft_messages(
+    brief_text: str, roster: str, digest_text: str, existing: list[dict]
+) -> list[dict]:
+    sections = [_context_block(brief_text, roster, "")]
+    sections.append("# Condensed record of the meeting\n" + digest_text)
+    if existing:
+        sections.append(
+            "# Action items the user already has (do not repeat these)\n"
+            + "\n".join(
+                f"- {item.get('who', '')}: {item.get('what', '')}"
+                + (f" (due {item['due']})" if item.get("due") else "")
+                for item in existing
+            )
+        )
+    sections.append("Return the JSON object now.")
+    return [
+        {"role": "system", "content": action_draft_system()},
+        {"role": "user", "content": "\n\n".join(p for p in sections if p)},
+    ]
+
+
+# ------------------------------------------------------------ review: reports
+
+_REPORT_BRIEFS = {
+    "minutes": (
+        "Write the minutes of this meeting: the formal record that goes in the "
+        "file and that someone will read in a year to find out what was agreed.\n\n"
+        "Structure, as Markdown:\n"
+        "- A title line, then a line with the date, the duration, and who "
+        "attended (mark absent invitees only if the transcript says so).\n"
+        "- `## 議程 / Agenda` if there was one.\n"
+        "- `## 討論` -- one subsection per topic, in the order discussed. For each: "
+        "what was proposed, who took which position, and how it was left. Keep the "
+        "positions attributed by name; minutes that say 'it was discussed' are "
+        "worthless.\n"
+        "- `## 決定` -- each decision on its own line, with who made it.\n"
+        "- `## 待辦事項` -- a Markdown table: 負責人 | 事項 | 期限.\n"
+        "- `## 未解決問題` -- questions raised and not answered.\n\n"
+        "Neutral, factual, past tense. Do not editorialise and do not add "
+        "recommendations of your own -- this is a record, not advice."
+    ),
+    "actions": (
+        "Write the action item list that gets sent round after the meeting.\n\n"
+        "Structure, as Markdown:\n"
+        "- One short opening line naming the meeting and its date.\n"
+        "- A table: 負責人 | 事項 | 期限 | 出處 -- where 出處 is the transcript "
+        "line reference in the form [#42], so anyone who disagrees can check what "
+        "was actually said.\n"
+        "- Then `## 未指派` for anything agreed with nobody to do it, if there is "
+        "any. This is the section that stops work quietly disappearing.\n"
+        "- Then `## 需要確認` for items that sounded like an intention rather than "
+        "a commitment, if there are any.\n\n"
+        "If the user has curated an action list, that list is authoritative: "
+        "reproduce their items and their wording, and add anything from the "
+        "meeting they are missing into 需要確認 rather than silently mixing it in."
+    ),
+    "summary": (
+        "Write a one-page executive summary for someone senior who was not in the "
+        "meeting and will give this ninety seconds.\n\n"
+        "Structure, as Markdown:\n"
+        "- `## 重點` -- three to five bullets. Each one a complete thought with the "
+        "actual number, date or name in it. No bullet that could have been written "
+        "without attending.\n"
+        "- `## 決定` -- what was settled.\n"
+        "- `## 風險同未解決事項` -- what is unresolved and what it puts at risk.\n"
+        "- `## 下一步` -- who does what next.\n\n"
+        "Under 400 words. Lead with what changed, not with who attended. If the "
+        "meeting settled nothing, say that in the first line -- that is the single "
+        "most useful thing you can tell a reader in that case."
+    ),
+    "email": (
+        "Write the follow-up email the user sends to the people who were in the "
+        "room, in their own voice as a participant.\n\n"
+        "Structure:\n"
+        "- A `Subject:` line.\n"
+        "- A greeting, then two or three sentences on what was agreed.\n"
+        "- A short list of who is doing what by when.\n"
+        "- Any question that needs an answer from a named person, stated so it is "
+        "obvious who has to reply.\n"
+        "- A brief close.\n\n"
+        "Write it ready to send: no placeholders in brackets, no 'as discussed' "
+        "padding, no line references (this one is going to other people, so keep "
+        "the transcript numbers out of it). Polite and businesslike, the way "
+        "colleagues in a Hong Kong office write to each other. Under 250 words."
+    ),
+}
+
+
+def report_kinds() -> list[str]:
+    return list(_REPORT_BRIEFS)
+
+
+def report_system(kind: str) -> str:
+    instruction = _REPORT_BRIEFS.get(kind)
+    if instruction is None:
+        raise KeyError(kind)
+    return (
+        "You produce documents from a finished meeting, working from a condensed "
+        "record of it.\n\n"
+        + instruction
+        + "\n\n"
+        + TRANSCRIPT_CAVEAT
+        + "\n\nWrite in "
+        + _language()
+        + ". Return Markdown only -- no commentary about the document, no "
+        "explanation of what you did.\n\n"
+        "The condensed record carries transcript line numbers like [#42]. Keep "
+        "them only where the instructions above ask for them, and never cite a "
+        "number that was not given to you. Where the record is silent, leave the "
+        "section out rather than filling it in from imagination: a reader will "
+        "act on this document believing it reflects the meeting."
+    )
+
+
+def report_messages(
+    kind: str,
+    brief_text: str,
+    roster: str,
+    digest_text: str,
+    notes: dict,
+    actions: list[dict],
+    user_notes: str,
+    meta: str,
+) -> list[dict]:
+    sections = [_context_block(brief_text, roster, "")]
+    if meta:
+        sections.append("# The meeting\n" + meta)
+    sections.append("# Condensed record of the meeting\n" + digest_text)
+    if notes:
+        sections.append(
+            "# Notes taken live during the meeting\n"
+            + json.dumps(notes, ensure_ascii=False, indent=2)
+        )
+    if actions:
+        sections.append(
+            "# The user's own action item list (authoritative)\n"
+            + "\n".join(
+                f"- [{item.get('status', 'open')}] {item.get('who') or 'unassigned'}: "
+                f"{item.get('what', '')}"
+                + (f" — due {item['due']}" if item.get("due") else "")
+                for item in actions
+            )
+        )
+    if (user_notes or "").strip():
+        sections.append("# The user's own notes\n" + user_notes.strip())
+    sections.append("Write the document now.")
+    return [
+        {"role": "system", "content": report_system(kind)},
+        {"role": "user", "content": "\n\n".join(p for p in sections if p)},
+    ]
+
+
 # ---------------------------------------------------------------------- shared
 
 

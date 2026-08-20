@@ -1,0 +1,254 @@
+/* Review workspace. Loaded after app.css and reuses its variables, panels,
+ * buttons and speaker chips -- the review layout is meant to feel like the
+ * recording layout, not like a different application. */
+
+.ghost-link {
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+.ghost-link:hover { color: var(--text); border-color: var(--accent); }
+
+.good-text { color: var(--good); }
+.warn-text { color: var(--warn); }
+
+/* ------------------------------------------------------------- job banner */
+
+.bar-track {
+  flex: 1 1 120px;
+  max-width: 240px;
+  height: 4px;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.bar-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+/* -------------------------------------------------------------- transcript */
+
+.search-row {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.search-row input[type="search"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#r-transcript .line {
+  display: grid;
+  grid-template-columns: 58px auto 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+}
+#r-transcript .line.hit { background: rgba(90, 169, 230, 0.07); }
+#r-transcript .line-time {
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+#r-transcript .line-time:hover { color: var(--accent); }
+#r-transcript .line-who {
+  background: none;
+  border: none;
+  border-bottom: 1px dotted transparent;
+  padding: 0;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#r-transcript .line-who:hover { border-bottom-color: currentColor; }
+#r-transcript .line-text mark {
+  background: var(--warn);
+  color: #1b1b1b;
+  border-radius: 2px;
+}
+
+@keyframes line-flash {
+  from { background: rgba(78, 201, 160, 0.35); }
+  to   { background: transparent; }
+}
+#r-transcript .line.flash { animation: line-flash 1.8s ease-out; }
+
+/* ------------------------------------------------------------------- chat */
+
+.chat-turn {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.chat-turn:last-child { border-bottom: none; }
+.chat-q {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.chat-a { white-space: pre-wrap; }
+.chat-turn.pending .chat-a { opacity: 0.7; }
+
+button.cite {
+  background: rgba(90, 169, 230, 0.15);
+  border: none;
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 0 4px;
+  margin: 0 1px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+button.cite:hover { background: var(--accent); color: #10141a; }
+.refs { margin-left: 6px; }
+
+/* ---------------------------------------------------------- action items */
+
+.actions-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.actions-table th {
+  text-align: left;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--line);
+  padding: 2px 4px;
+}
+.actions-table td {
+  padding: 2px 4px;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--line);
+}
+.actions-table td input[type="text"] {
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  color: inherit;
+  padding: 3px 4px;
+}
+.actions-table td input[type="text"]:hover { border-color: var(--line); }
+.actions-table td input[type="text"]:focus {
+  border-color: var(--accent);
+  background: var(--bg);
+}
+/* Owner and due are narrow; the task takes whatever is left. */
+.actions-table th:nth-child(1), .actions-table td:nth-child(1) { width: 26px; }
+.actions-table th:nth-child(2), .actions-table td:nth-child(2) { width: 22%; }
+.actions-table th:nth-child(4), .actions-table td:nth-child(4) { width: 18%; }
+.actions-table th:nth-child(5), .actions-table td:nth-child(5) { width: 28px; }
+.actions-table tr.done { opacity: 0.5; }
+.actions-table tr.done td:nth-child(3) input { text-decoration: line-through; }
+
+.add-action {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.add-action input { min-width: 0; }
+.add-action input#r-new-what { flex: 1 1 auto; }
+
+.proposals-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+#r-proposals {
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  padding: 8px;
+  margin-bottom: 10px;
+}
+.proposal {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--line);
+}
+.proposal:first-child { border-top: none; }
+
+/* ---------------------------------------------------------------- reports */
+
+.report-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.report-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+.report-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: inherit;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+.report-row:hover { border-color: var(--line); }
+.report-row.active {
+  border-color: var(--accent);
+  background: rgba(90, 169, 230, 0.08);
+}
+
+#r-report-view {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.report-view-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+#r-report-body {
+  flex: 1 1 auto;
+  min-height: 220px;
+  width: 100%;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* The reports panel holds a list and an editor, so its body has to be a column
+ * that can actually shrink -- without min-height:0 the textarea wins and the
+ * panel grows past the viewport. */
+#panel-r-reports .panel-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}

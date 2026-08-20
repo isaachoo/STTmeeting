@@ -91,6 +91,7 @@ const ui = {
   btnStart: el('btn-start'),
   btnPause: el('btn-pause'),
   btnStop: el('btn-stop'),
+  btnReview: el('btn-review'),
   drawer: el('drawer'),
 
   setup: el('setup'),
@@ -615,6 +616,11 @@ async function loadHistory() {
       left.append(title, meta);
 
       const links = document.createElement('div');
+      const review = document.createElement('a');
+      review.href = `/review/${meeting.id}`;
+      review.textContent = 'Review';
+      review.title = 'Ask questions, draft actions, write the minutes';
+      links.append(review);
       ['md', 'json'].forEach((suffix) => {
         const link = document.createElement('a');
         link.href = `/api/meetings/${meeting.id}/export.${suffix}`;
@@ -1286,9 +1292,19 @@ socket.on('meeting_stopped', (payload) => {
   ui.statusText.textContent = 'finished';
   ui.interim.textContent = '';
   if (payload.notes) renderNotes(payload.notes);
-  log(`meeting ${payload.meeting_id} finished and saved — Session ▸ Download to keep it`);
+  log(`meeting ${payload.meeting_id} finished and saved`);
+  showReviewLink(payload.meeting_id);
   loadHistory();
 });
+
+/* The meeting is over but the work on it is not. This is the one moment the user
+ * definitely wants the review workspace, so it is offered rather than left to be
+ * found in the drawer. */
+function showReviewLink(id) {
+  if (!id) return;
+  ui.btnReview.href = `/review/${id}`;
+  ui.btnReview.hidden = false;
+}
 
 socket.on('status', (status) => {
   const detail = status.detail ? ` — ${status.detail}` : '';

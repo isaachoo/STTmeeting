@@ -45,6 +45,47 @@ CREATE TABLE IF NOT EXISTS events (
     payload    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_meeting ON events(meeting_id, id);
+
+-- ------------------------------------------------ the review workspace
+-- Action items live in their own table rather than inside notes_json, because
+-- after the meeting they stop being a model's opinion and become the user's
+-- list: editable, tickable, and safe from the next regeneration.
+CREATE TABLE IF NOT EXISTS action_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id INTEGER NOT NULL REFERENCES meetings(id),
+    who        TEXT NOT NULL DEFAULT '',
+    what       TEXT NOT NULL DEFAULT '',
+    due        TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'open',
+    source     TEXT NOT NULL DEFAULT 'user',
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS action_items_meeting
+    ON action_items(meeting_id, position, id);
+
+CREATE TABLE IF NOT EXISTS reports (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id INTEGER NOT NULL REFERENCES meetings(id),
+    kind       TEXT NOT NULL,
+    title      TEXT NOT NULL DEFAULT '',
+    body       TEXT NOT NULL DEFAULT '',
+    model      TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reports_meeting ON reports(meeting_id, id);
+
+CREATE TABLE IF NOT EXISTS review_chat (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id INTEGER NOT NULL REFERENCES meetings(id),
+    at         REAL NOT NULL,
+    question   TEXT NOT NULL,
+    answer     TEXT NOT NULL DEFAULT '',
+    cited      TEXT NOT NULL DEFAULT '[]',
+    cost_usd   REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS review_chat_meeting ON review_chat(meeting_id, id);
 """
 
 # Columns added after the first release. Applied on every init so an existing
@@ -54,6 +95,11 @@ MIGRATIONS = {
         "brief_json": "ALTER TABLE meetings ADD COLUMN brief_json TEXT NOT NULL DEFAULT '{}'",
         "speakers_json": "ALTER TABLE meetings ADD COLUMN speakers_json TEXT NOT NULL DEFAULT '{}'",
         "provider": "ALTER TABLE meetings ADD COLUMN provider TEXT NOT NULL DEFAULT ''",
+        # The review digest: a condensed reading of the whole transcript, built
+        # once and reused by every report and question. `digest_upto` records how
+        # many segments went into it, so it can be rebuilt if that ever changes.
+        "digest_json": "ALTER TABLE meetings ADD COLUMN digest_json TEXT NOT NULL DEFAULT '{}'",
+        "digest_upto": "ALTER TABLE meetings ADD COLUMN digest_upto INTEGER NOT NULL DEFAULT 0",
     },
     # A name attached to one line, overriding whatever the diarisation said.
     # Needed because engines split one person across two voices, or merge two
@@ -219,6 +265,195 @@ def get_meeting(meeting_id: int) -> dict | None:
         int(k): v for k, v in (meeting.get("speakers_json") or {}).items() if str(k).isdigit()
     }
     return meeting
+
+
+# ------------------------------------------------------------ review workspace
+
+
+def save_digest(meeting_id: int, digest: dict, upto: int) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE meetings SET digest_json = ?, digest_upto = ? WHERE id = ?",
+            (json.dumps(digest, ensure_ascii=False), int(upto), meeting_id),
+        )
+
+
+def get_digest(meeting_id: int) -> tuple[dict, int]:
+    """The cached digest and how many segments it covers. ({}, 0) if there is none."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT digest_json, digest_upto FROM meetings WHERE id = ?", (meeting_id,)
+        ).fetchone()
+    if not row:
+        return {}, 0
+    return _json(row["digest_json"]), int(row["digest_upto"] or 0)
+
+
+def list_actions(meeting_id: int) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM action_items WHERE meeting_id = ?"
+            " ORDER BY position, id",
+            (meeting_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_action(
+    meeting_id: int, who: str, what: str, due: str = "", source: str = "user"
+) -> dict:
+    with _connect() as conn:
+        nxt = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS p FROM action_items"
+            " WHERE meeting_id = ?",
+            (meeting_id,),
+        ).fetchone()["p"]
+        cur = conn.execute(
+            "INSERT INTO action_items (meeting_id, who, what, due, source, position,"
+            " created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (meeting_id, who, what, due, source, nxt, time.time()),
+        )
+        row = conn.execute(
+            "SELECT * FROM action_items WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+    return dict(row)
+
+
+def update_action(meeting_id: int, action_id: int, fields: dict) -> dict | None:
+    """Patch one item. Only the columns a user is allowed to change."""
+    allowed = {"who", "what", "due", "status", "position"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return get_action(meeting_id, action_id)
+    assignments = ", ".join(f"{name} = ?" for name in updates)
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE action_items SET {assignments} WHERE id = ? AND meeting_id = ?",
+            (*updates.values(), action_id, meeting_id),
+        )
+    return get_action(meeting_id, action_id)
+
+
+def get_action(meeting_id: int, action_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM action_items WHERE id = ? AND meeting_id = ?",
+            (action_id, meeting_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def delete_action(meeting_id: int, action_id: int) -> bool:
+    with _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM action_items WHERE id = ? AND meeting_id = ?",
+            (action_id, meeting_id),
+        )
+        return cur.rowcount > 0
+
+
+def save_report(meeting_id: int, kind: str, title: str, body: str, model: str) -> dict:
+    """One row per generation, so regenerating keeps the previous version."""
+    now = time.time()
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO reports (meeting_id, kind, title, body, model, created_at,"
+            " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (meeting_id, kind, title, body, model, now, now),
+        )
+        row = conn.execute("SELECT * FROM reports WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return dict(row)
+
+
+def update_report(report_id: int, body: str, title: str | None = None) -> dict | None:
+    with _connect() as conn:
+        if title is None:
+            conn.execute(
+                "UPDATE reports SET body = ?, updated_at = ? WHERE id = ?",
+                (body, time.time(), report_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE reports SET body = ?, title = ?, updated_at = ? WHERE id = ?",
+                (body, title, time.time(), report_id),
+            )
+    return get_report(report_id)
+
+
+def get_report(report_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def delete_report(report_id: int) -> bool:
+    with _connect() as conn:
+        return conn.execute("DELETE FROM reports WHERE id = ?", (report_id,)).rowcount > 0
+
+
+def list_reports(meeting_id: int, with_body: bool = True) -> list[dict]:
+    columns = "*" if with_body else "id, meeting_id, kind, title, model, created_at, updated_at"
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT {columns} FROM reports WHERE meeting_id = ? ORDER BY id DESC",
+            (meeting_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_chat_turn(
+    meeting_id: int, question: str, answer: str, cited: list, cost_usd: float
+) -> dict:
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO review_chat (meeting_id, at, question, answer, cited, cost_usd)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                meeting_id,
+                time.time(),
+                question,
+                answer,
+                json.dumps(cited, ensure_ascii=False),
+                float(cost_usd or 0),
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM review_chat WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+    turn = dict(row)
+    turn["cited"] = _json_list(turn.get("cited"))
+    return turn
+
+
+def list_chat(meeting_id: int, limit: int = 200) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM review_chat WHERE meeting_id = ? ORDER BY id LIMIT ?",
+            (meeting_id, limit),
+        ).fetchall()
+    turns = []
+    for row in rows:
+        turn = dict(row)
+        turn["cited"] = _json_list(turn.get("cited"))
+        turns.append(turn)
+    return turns
+
+
+def clear_chat(meeting_id: int) -> int:
+    with _connect() as conn:
+        return conn.execute(
+            "DELETE FROM review_chat WHERE meeting_id = ?", (meeting_id,)
+        ).rowcount
+
+
+def _json_list(raw) -> list:
+    if isinstance(raw, list):
+        return raw
+    try:
+        value = json.loads(raw or "[]")
+    except (ValueError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
 
 
 def _json(raw):

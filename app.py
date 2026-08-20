@@ -28,6 +28,11 @@ from simple_websocket import ConnectionClosed
 import config
 import settings
 from copilot.brief import Brief
+from copilot.llm import LLMError
+from review import digest as review_digest
+from review import jobs as review_jobs
+from review import qa as review_qa
+from review import reports as review_reports
 from session import MeetingSession
 from storage import db, export
 
@@ -247,6 +252,351 @@ def _download(meeting_id: int, render, suffix: str, mimetype: str):
         mimetype=mimetype,
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )
+
+
+# ------------------------------------------------------------ review workspace
+#
+# Everything below works on a stored meeting, over plain HTTP. The live meeting
+# uses a WebSocket because it pushes; review is request/response, and a page you
+# can reload and bookmark is worth more here than a persistent connection.
+
+
+@app.get("/review/<int:meeting_id>")
+def review_page(meeting_id: int):
+    meeting = db.get_meeting(meeting_id)
+    if meeting is None:
+        return render_template("review.html", meeting=None, meeting_id=meeting_id), 404
+    return render_template(
+        "review.html",
+        meeting=meeting,
+        meeting_id=meeting_id,
+        report_kinds=config.REPORT_KINDS,
+        review_model=config.review_model(),
+        # Only the LLM key matters here. Nothing on this page transcribes
+        # anything, so complaining about a missing speech key would be noise.
+        missing_keys=[] if config.OPENROUTER_API_KEY else ["OPENROUTER_API_KEY"],
+    )
+
+
+@app.get("/api/meetings/<int:meeting_id>/review")
+def review_data(meeting_id: int):
+    """One request for everything the review page needs to draw itself."""
+    meeting = db.get_meeting(meeting_id)
+    if meeting is None:
+        return jsonify({"error": "not found"}), 404
+
+    digest, upto = db.get_digest(meeting_id)
+    segments = meeting.get("segments") or []
+    running = bool(
+        _session and _session.meeting_id == meeting_id and not _session.stopped
+    )
+    job = review_jobs.running_for(meeting_id)
+    return jsonify(
+        {
+            "meeting": {
+                key: meeting.get(key)
+                for key in (
+                    "id", "title", "started_at", "ended_at", "audio_seconds",
+                    "language", "stt_model", "provider", "summary", "user_notes",
+                    "notes_json", "brief_json", "usage_json",
+                )
+            },
+            "segments": segments,
+            "speaker_names": {str(k): v for k, v in (meeting.get("speaker_names") or {}).items()},
+            "running": running,
+            "actions": db.list_actions(meeting_id),
+            "reports": db.list_reports(meeting_id, with_body=False),
+            "chat": db.list_chat(meeting_id),
+            "digest": {
+                "built": bool(digest),
+                "stale": bool(digest) and upto != len(segments),
+                "sections": (digest or {}).get("sections", 0),
+                "failed_sections": (digest or {}).get("failed_sections", []),
+                # An estimate so the page can say what building it will involve
+                # before the user commits to paying for it.
+                "estimated_sections": len(
+                    review_digest.chunk_transcript(
+                        segments, meeting.get("speaker_names") or {}
+                    )
+                ),
+            },
+            "job": job.as_dict() if job else None,
+        }
+    )
+
+
+@app.post("/api/meetings/<int:meeting_id>/segments/<int:index>/speaker")
+def review_name_segment(meeting_id: int, index: int):
+    """Fix the speaker on one line, after the meeting."""
+    if _is_live(meeting_id):
+        return jsonify({"error": "This meeting is still running — rename in the live view."}), 409
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name") or "").strip()[:80]
+    db.set_segment_speaker(meeting_id, index, name)
+    return jsonify({"index": index, "speaker_name": name})
+
+
+@app.post("/api/meetings/<int:meeting_id>/speakers")
+def review_name_speaker(meeting_id: int):
+    """Rename a whole voice, after the meeting."""
+    if _is_live(meeting_id):
+        return jsonify({"error": "This meeting is still running — rename in the live view."}), 409
+    meeting = db.get_meeting(meeting_id)
+    if meeting is None:
+        return jsonify({"error": "not found"}), 404
+    payload = request.get_json(silent=True) or {}
+    try:
+        speaker = int(payload.get("speaker"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "speaker must be a number"}), 400
+
+    names = dict(meeting.get("speaker_names") or {})
+    name = str(payload.get("name") or "").strip()[:80]
+    if name:
+        names[speaker] = name
+    else:
+        names.pop(speaker, None)
+    db.save_speakers(meeting_id, names)
+    return jsonify({"speaker_names": {str(k): v for k, v in names.items()}})
+
+
+@app.post("/api/meetings/<int:meeting_id>/ask")
+def review_ask(meeting_id: int):
+    """One question about the meeting. Synchronous: it is a single LLM call."""
+    meeting = db.get_meeting(meeting_id)
+    if meeting is None:
+        return jsonify({"error": "not found"}), 404
+    if not config.OPENROUTER_API_KEY:
+        return jsonify({"error": "OPENROUTER_API_KEY is not set"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    question = str(payload.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "no question"}), 400
+
+    try:
+        result = review_qa.ask(meeting, question, history=db.list_chat(meeting_id))
+    except LLMError as exc:
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(result)
+
+
+@app.delete("/api/meetings/<int:meeting_id>/chat")
+def review_clear_chat(meeting_id: int):
+    return jsonify({"removed": db.clear_chat(meeting_id)})
+
+
+# ------------------------------------------------------------- action items
+
+
+@app.get("/api/meetings/<int:meeting_id>/actions")
+def review_actions(meeting_id: int):
+    return jsonify({"actions": db.list_actions(meeting_id)})
+
+
+@app.post("/api/meetings/<int:meeting_id>/actions")
+def review_add_action(meeting_id: int):
+    """Add one item, or several at once when accepting a batch of proposals."""
+    if db.get_meeting(meeting_id) is None:
+        return jsonify({"error": "not found"}), 404
+    payload = request.get_json(silent=True) or {}
+    items = payload.get("items")
+    raws = items if isinstance(items, list) else [payload]
+
+    added = []
+    for raw in raws[:100]:
+        if not isinstance(raw, dict):
+            continue
+        what = str(raw.get("what") or "").strip()[:500]
+        if not what:
+            continue
+        added.append(
+            db.add_action(
+                meeting_id,
+                who=str(raw.get("who") or "").strip()[:80],
+                what=what,
+                due=str(raw.get("due") or "").strip()[:80],
+                source=("copilot" if raw.get("source") == "copilot" else "user"),
+            )
+        )
+    if not added:
+        return jsonify({"error": "nothing to add"}), 400
+    return jsonify({"added": added, "actions": db.list_actions(meeting_id)})
+
+
+@app.patch("/api/meetings/<int:meeting_id>/actions/<int:action_id>")
+def review_update_action(meeting_id: int, action_id: int):
+    payload = request.get_json(silent=True) or {}
+    fields = {}
+    for name, limit in (("who", 80), ("what", 500), ("due", 80)):
+        if name in payload:
+            fields[name] = str(payload[name] or "").strip()[:limit]
+    if "status" in payload:
+        fields["status"] = "done" if payload["status"] == "done" else "open"
+    if "position" in payload:
+        try:
+            fields["position"] = int(payload["position"])
+        except (TypeError, ValueError):
+            pass
+
+    updated = db.update_action(meeting_id, action_id, fields)
+    if updated is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"action": updated})
+
+
+@app.delete("/api/meetings/<int:meeting_id>/actions/<int:action_id>")
+def review_delete_action(meeting_id: int, action_id: int):
+    if not db.delete_action(meeting_id, action_id):
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"deleted": action_id})
+
+
+@app.post("/api/meetings/<int:meeting_id>/actions/draft")
+def review_draft_actions(meeting_id: int):
+    """Ask the copilot what it thinks the action items are. Saves nothing."""
+    return _start_review_job(
+        meeting_id,
+        kind="draft_actions",
+        label="Drafting action items",
+        work=lambda meeting, job: review_reports.draft_actions(
+            meeting, on_progress=_progress(job)
+        ),
+    )
+
+
+# ----------------------------------------------------------------- reports
+
+
+@app.get("/api/meetings/<int:meeting_id>/reports")
+def review_reports_list(meeting_id: int):
+    return jsonify({"reports": db.list_reports(meeting_id)})
+
+
+@app.post("/api/meetings/<int:meeting_id>/reports")
+def review_generate_report(meeting_id: int):
+    payload = request.get_json(silent=True) or {}
+    kind = str(payload.get("kind") or "").strip()
+    if kind not in review_reports.KINDS:
+        return jsonify({"error": f"unknown report kind: {kind}"}), 400
+    label = review_reports.KINDS[kind]["label"]
+    return _start_review_job(
+        meeting_id,
+        kind=f"report:{kind}",
+        label=f"Writing the {label.lower()}",
+        work=lambda meeting, job: review_reports.generate(
+            meeting, kind, on_progress=_progress(job)
+        ),
+    )
+
+
+@app.post("/api/meetings/<int:meeting_id>/digest")
+def review_build_digest(meeting_id: int):
+    """Read the whole transcript up front, so later work is fast and cheap."""
+    return _start_review_job(
+        meeting_id,
+        kind="digest",
+        label="Reading the meeting",
+        work=lambda meeting, job: _digest_result(
+            *review_digest.ensure(meeting, on_progress=_progress(job, "reading"))
+        ),
+    )
+
+
+@app.get("/api/reports/<int:report_id>")
+def review_get_report(report_id: int):
+    report = db.get_report(report_id)
+    if report is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"report": report})
+
+
+@app.put("/api/reports/<int:report_id>")
+def review_save_report(report_id: int):
+    """Save the user's edits. A report is a draft until they have fixed it."""
+    payload = request.get_json(silent=True) or {}
+    if "body" not in payload:
+        return jsonify({"error": "no body"}), 400
+    title = payload.get("title")
+    updated = db.update_report(
+        report_id,
+        str(payload["body"])[:200_000],
+        None if title is None else str(title)[:200],
+    )
+    if updated is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"report": updated})
+
+
+@app.delete("/api/reports/<int:report_id>")
+def review_delete_report(report_id: int):
+    if not db.delete_report(report_id):
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"deleted": report_id})
+
+
+@app.get("/api/reports/<int:report_id>/download.md")
+def review_download_report(report_id: int):
+    report = db.get_report(report_id)
+    if report is None:
+        return jsonify({"error": "not found"}), 404
+    meeting = db.get_meeting(report["meeting_id"]) or {}
+    name = review_reports.filename_for(report, meeting)
+    return Response(
+        report["body"],
+        mimetype="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+@app.get("/api/jobs/<job_id>")
+def review_job(job_id: str):
+    job = review_jobs.get(job_id)
+    if job is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"job": job.as_dict()})
+
+
+def _is_live(meeting_id: int) -> bool:
+    session = _session
+    return bool(session and session.meeting_id == meeting_id and not session.stopped)
+
+
+def _progress(job, stage: str = ""):
+    """Adapt a job to the two progress shapes the review code reports."""
+
+    def report(*args):
+        if len(args) == 3:
+            job.progress(args[0], args[1], args[2])
+        elif len(args) == 2:
+            job.progress(stage or job.stage or "working", args[0], args[1])
+
+    return report
+
+
+def _digest_result(digest: dict, built: bool) -> dict:
+    return {
+        "built": built,
+        "sections": digest.get("sections", 0),
+        "failed_sections": digest.get("failed_sections", []),
+        "counts": {
+            key: len(digest.get(key) or [])
+            for key in ("topics", "decisions", "actions", "questions", "facts")
+        },
+    }
+
+
+def _start_review_job(meeting_id: int, kind: str, label: str, work):
+    meeting = db.get_meeting(meeting_id)
+    if meeting is None:
+        return jsonify({"error": "not found"}), 404
+    if not config.OPENROUTER_API_KEY:
+        return jsonify({"error": "OPENROUTER_API_KEY is not set"}), 400
+    try:
+        job = review_jobs.start(meeting_id, kind, label, lambda job: work(meeting, job))
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
+    return jsonify({"job": job.as_dict()}), 202
 
 
 # -------------------------------------------------------------------- websocket

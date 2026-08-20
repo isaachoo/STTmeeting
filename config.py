@@ -164,6 +164,42 @@ DEEPGRAM_KEYTERMS = _bool("DEEPGRAM_KEYTERMS", True)
 RECENT_WINDOW_CHARS = _int("RECENT_WINDOW_CHARS", 4000)
 SUMMARY_TRIGGER_CHARS = _int("SUMMARY_TRIGGER_CHARS", 6000)
 
+# --- Review workspace (after the meeting) ---
+# A five-hour meeting is far too long to put in one prompt, so the review side
+# works from a digest built once by reading the transcript in chunks, and from
+# retrieved passages for anything that needs the actual words.
+REVIEW_CHUNK_CHARS = _int("REVIEW_CHUNK_CHARS", 4500)
+REVIEW_WINDOW_CHARS = _int("REVIEW_WINDOW_CHARS", 700)  # one retrievable passage
+REVIEW_PASSAGES = _int("REVIEW_PASSAGES", 8)  # passages sent with a question
+REVIEW_MODEL = (os.getenv("REVIEW_MODEL") or "").strip()  # falls back to OPENROUTER_MODEL
+
+REPORT_KINDS = [
+    {
+        "code": "minutes",
+        "label": "Minutes",
+        "hint": "Formal record: attendees, what was discussed, decisions, actions.",
+    },
+    {
+        "code": "actions",
+        "label": "Action items",
+        "hint": "Owner, task, date — the list you send round afterwards.",
+    },
+    {
+        "code": "summary",
+        "label": "Executive summary",
+        "hint": "One page for someone who was not there and has two minutes.",
+    },
+    {
+        "code": "email",
+        "label": "Follow-up email",
+        "hint": "Ready to paste and send to the people who were in the room.",
+    },
+]
+
+
+def review_model() -> str:
+    return REVIEW_MODEL or OPENROUTER_MODEL
+
 # --- Server ---
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = _int("PORT", 5000)

@@ -149,6 +149,32 @@ executive summary, and a follow-up email.
 
 **Effort**: 3–4 days. **Risk**: scope only.
 
+### Built — what shipped, and what it does differently to the sketch above
+
+The four default reports were confirmed: minutes, action items, executive summary,
+follow-up email. `/review/<id>` is the page.
+
+Two things came out differently from the plan:
+
+**Retrieval alone was not enough for reports.** Retrieval answers questions well —
+a question names the thing it is about, so the right passages are findable. Minutes
+are not a question; they need the whole meeting. So there are two mechanisms, not
+one: retrieval for questions, and a **digest** for documents. The digest reads the
+transcript once in sections, condenses each into structured facts that keep their
+line numbers, and caches the result. All four reports and every later question reuse
+it, so reading the meeting is paid for once.
+
+**Reading is explicit, not automatic.** It is a dozen or more LLM calls and about a
+minute of waiting. Doing that silently because someone typed a question would be a
+surprise on a user's OpenRouter bill, so the page shows what it would cost in
+sections and asks. Until then questions are answered from retrieved passages plus
+the notes taken live, and the page says which one you got.
+
+Retrieval is BM25 over character bigrams and English words, with single Chinese
+characters kept at a discount — no embedding model, no vector store, no second API
+key. Line numbers thread all the way through: passage → digest → citation → the
+`#42` you click in the transcript, with invented numbers filtered out server-side.
+
 ---
 
 ## 6. Change the speaker on a single line — Medium
@@ -344,7 +370,7 @@ own audio. Item 3 (Speechmatics) alongside it, so all three engines can be judge
 the same recording rather than on claims. Then item 6, since whichever engine wins,
 you will still want to correct a line by hand.
 
-**Batch 3 — the review workspace (3–4 days)**
+**Batch 3 — the review workspace (3–4 days)** — done
 Item 5, reusing the filtering and speaker editing from batches 1 and 2.
 
 **Batch 4 — online meetings (1–2 days)**
@@ -358,8 +384,7 @@ plausible mechanism for the slang problem specifically.
 
 ## What I need from you
 
-1. **Reports for the review workspace** — minutes, exec summary, action items and a
-   follow-up email, or something else? This shapes item 5.
+1. ~~**Reports for the review workspace**~~ — answered: the default four.
 2. **Teams or Zoom, and how often?** If it is occasional, Route A is enough. If it is
    most of your meetings, Route B is worth the extra day.
 3. **Do you want Speechmatics as a permanent alternative, or as a one-off comparison?**
