@@ -8,3 +8,13 @@ data/
 *.wav
 .DS_Store
 data/models/
+
+# Android build outputs (the sources under android/ are tracked)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+android/.kotlin/

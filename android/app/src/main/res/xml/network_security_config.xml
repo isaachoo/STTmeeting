@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android blocks plain-HTTP by default. The only plain-HTTP traffic here is
+     the WebView talking to the server inside the same app on 127.0.0.1, so
+     that one address is allowed and nothing else is. Deepgram, Speechmatics
+     and OpenRouter are all HTTPS/WSS and unaffected. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

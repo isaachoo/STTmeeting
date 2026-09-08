@@ -107,6 +107,13 @@ cp .env.example .env      # then fill in DEEPGRAM_API_KEY and OPENROUTER_API_KEY
 .venv/bin/python app.py
 ```
 
+### Android
+
+The same app can be built as a standalone Android APK — the Python server runs
+inside the app and the page is shown full-screen, so a phone in the middle of
+the table does the recording with no PC involved. Step-by-step instructions for
+a first-time Android Studio user are in **[ANDROID.md](ANDROID.md)**.
+
 ### API keys
 
 Two ways, and you only need one:

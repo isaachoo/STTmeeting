@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Meeting Copilot</string>
+    <string name="starting">Starting the copilot…</string>
+    <string name="still_starting">Still starting — the first launch unpacks Python and takes a little longer.</string>
+    <string name="server_failed">The server did not start. Reopen the app; if it happens again, see ANDROID.md → Troubleshooting.</string>
+    <string name="notification_channel">Meeting Copilot</string>
+    <string name="notification_title">Meeting Copilot is running</string>
+    <string name="notification_text">Keeps listening while the screen is off. Tap to open.</string>
+    <string name="notification_quit">Quit</string>
+    <string name="mic_needed">Microphone permission is needed to record a meeting. Allow it in Settings → Apps → Meeting Copilot.</string>
+    <string name="saved_to_downloads">Saved to Downloads: %1$s</string>
+    <string name="save_failed">Could not save: %1$s</string>
+</resources>

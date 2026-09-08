@@ -18,6 +18,7 @@ the socket, which keeps sends single-threaded without any locking.
 
 import json
 import logging
+import os
 import queue
 import threading
 
@@ -42,7 +43,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("app")
 
-app = Flask(__name__)
+# Flask finds templates/ and static/ next to this file. Inside the Android app
+# the Python code is unpacked somewhere else from the web files, so the two
+# folders can be pointed at explicitly. Unset on a PC, and nothing changes.
+app = Flask(
+    __name__,
+    template_folder=os.getenv("MEETING_TEMPLATE_DIR") or "templates",
+    static_folder=os.getenv("MEETING_STATIC_DIR") or "static",
+)
 app.config["SECRET_KEY"] = config.SECRET_KEY
 # No ping_interval on purpose. simple_websocket sends its keepalive PING from
 # its own background reader thread, while this app sends events from the

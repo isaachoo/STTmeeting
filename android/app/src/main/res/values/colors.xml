@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The same palette as static/css/app.css. -->
+    <color name="background">#0F1115</color>
+    <color name="accent">#5AA9E6</color>
+    <color name="text">#E6E9EF</color>
+    <color name="muted">#8D95A3</color>
+    <color name="ic_launcher_background">#0F1115</color>
+</resources>

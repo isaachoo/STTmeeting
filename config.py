@@ -6,7 +6,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+# The Android build has no writable directory next to the code, so it points
+# this at the app's private storage. On a PC it is simply ./data as before.
+DATA_DIR = Path(os.getenv("MEETING_DATA_DIR") or BASE_DIR / "data")
 AUDIO_DIR = DATA_DIR / "audio"
 
 load_dotenv(BASE_DIR / ".env")
