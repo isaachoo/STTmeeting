@@ -341,6 +341,65 @@ def live_ask_messages(
     return messages
 
 
+# ---------------------------------------------------------- general assistant
+
+
+def general_chat_system() -> str:
+    return (
+        "You are a general-purpose assistant sitting beside someone at work. They "
+        "may be in a meeting or not; either way this is a private side "
+        "conversation, not part of any meeting record. They ask you whatever they "
+        "want to know: a fact, a definition, a figure, a regulation, how to phrase "
+        "something, a quick calculation, background on a company or a technology.\n\n"
+        "Write in "
+        + _language()
+        + ", unless the question is asked in English, in which case answer in "
+        "English.\n\n"
+        "Rules:\n"
+        "- Be direct and compact. Lead with the answer; then only the detail that "
+        "changes what the reader would do. They are reading this on a side panel, "
+        "often while something else is going on.\n"
+        "- If web search results are provided, ground the answer in them and cite "
+        "them as [1], [2] matching their numbers. Say when the results do not "
+        "actually answer the question.\n"
+        "- If no results are provided, answer from your own knowledge and open "
+        "with a short flag that it is unverified whenever the answer is a specific "
+        "figure, date, price, law or recent event. Never invent a source.\n"
+        "- If a brief for the current meeting is given, use it only to understand "
+        "what the person is working on. Questions about what was *said* in the "
+        "meeting are answered elsewhere; if they ask one here, answer what you can "
+        "and say the Copilot panel has the transcript.\n"
+        "- Under 200 words unless the question genuinely needs more."
+    )
+
+
+def general_chat_messages(
+    question: str,
+    sources: list[dict],
+    history: list[dict],
+    meeting_context: str = "",
+) -> list[dict]:
+    sections = []
+    if meeting_context:
+        sections.append("# What the person is in the middle of (for context only)\n" + meeting_context)
+    if sources:
+        rendered = "\n\n".join(
+            f"[{i}] {s.get('title', '')}\n{s.get('url', '')}\n{s.get('content', '')}"
+            for i, s in enumerate(sources, start=1)
+        )
+        sections.append("# Web search results\n" + rendered)
+    sections.append("# Question\n" + question)
+
+    messages = [{"role": "system", "content": general_chat_system()}]
+    for turn in history[-10:]:
+        role = turn.get("role")
+        content = (turn.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content[:4000]})
+    messages.append({"role": "user", "content": "\n\n".join(sections)})
+    return messages
+
+
 # -------------------------------------------------------------------- summary
 
 

@@ -28,8 +28,9 @@ from simple_websocket import ConnectionClosed
 
 import config
 import settings
+from copilot import prompts, search
 from copilot.brief import Brief
-from copilot.llm import LLMError
+from copilot.llm import LLMError, OpenRouterClient
 from review import digest as review_digest
 from review import jobs as review_jobs
 from review import qa as review_qa
@@ -230,6 +231,60 @@ def finish_interrupted(meeting_id: int):
     if not db.close_interrupted(meeting_id):
         return jsonify({"error": "not an unfinished meeting"}), 404
     return jsonify({"finished": meeting_id})
+
+
+# ------------------------------------------------------------ general chat
+#
+# The side-panel assistant. Not about the meeting -- that is the Copilot panel's
+# job -- so it does not need a running session and has nothing to persist on
+# the server: the browser keeps the conversation and sends the recent turns.
+
+
+@app.post("/api/chat")
+def general_chat():
+    if not config.OPENROUTER_API_KEY:
+        return jsonify({"error": "OPENROUTER_API_KEY is not set"}), 400
+    payload = request.get_json(silent=True) or {}
+    question = str(payload.get("question") or "").strip()[:2000]
+    if not question:
+        return jsonify({"error": "no question"}), 400
+    web = bool(payload.get("web"))
+    history = payload.get("history")
+    history = [t for t in history if isinstance(t, dict)] if isinstance(history, list) else []
+
+    sources: list[dict] = []
+    if web and search.available():
+        sources = search.search(question)
+
+    # A running meeting's brief helps the model understand the person's day; it
+    # is context, not the subject.
+    meeting_context = ""
+    session = _session
+    if session is not None and not session.stopped:
+        with session.state.lock:
+            meeting_context = session.state.brief.render()
+
+    client = OpenRouterClient()
+    try:
+        answer = client.chat(
+            prompts.general_chat_messages(question, sources, history, meeting_context),
+            model=config.OPENROUTER_MODEL,
+            temperature=0.3,
+            max_tokens=900,
+        ).strip()
+    except LLMError as exc:
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(
+        {
+            "question": question,
+            "answer": answer,
+            "sources": [{"title": s.get("title", ""), "url": s.get("url", "")} for s in sources],
+            "searched": bool(sources),
+            "web_requested": web,
+            "web_enabled": search.available(),
+            "cost_usd": client.usage.snapshot().get("cost_usd", 0.0),
+        }
+    )
 
 
 # --------------------------------------------------------------- saved briefs

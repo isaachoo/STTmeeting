@@ -8,43 +8,45 @@ Live only — there is no file upload. You press Start, it listens; you press
 Stop, it writes the final notes.
 
 ```
-┌─────────────────────────────┬─────────────────────────────┐
-│  Live transcript            │  Copilot — private to you   │
-│  one voice per speaker,     │  key points, questions      │
-│  named, streaming           │  worth asking, watch-outs,  │
-│                             │  answers to what you ask    │
-├─────────────────────────────┼─────────────────────────────┤
-│  AI attendee                │  Notes                      │
-│  speaks up like a           │  decisions, action items,   │
-│  participant: raises        │  open questions, topics,    │
-│  questions, answers the     │  plus your own notes        │
-│  room's, with sources       │                             │
-└─────────────────────────────┴─────────────────────────────┘
+┌─────────────────────────┬─────────────────────────┬────────────────┐
+│  Live transcript        │  Copilot — private      │  Assistant     │
+│  one voice per speaker, │  key points, questions  │  anything at   │
+│  named, streaming       │  worth asking, watch-   │  all: facts,   │
+│                         │  outs, and answers      │  figures, the  │
+│                         │  about THIS meeting     │  web, wording  │
+├─────────────────────────┼─────────────────────────┤                │
+│  AI attendee            │  Notes                  │  not tied to   │
+│  speaks up like a       │  decisions, action      │  the meeting;  │
+│  participant: raises    │  items, open questions, │  works before, │
+│  questions, answers the │  topics, plus your own  │  during and    │
+│  room's, with sources   │  notes                  │  after         │
+└─────────────────────────┴─────────────────────────┴────────────────┘
 ```
 
 Cost, exports, API keys and history live in the **Session** drawer in the title
 bar. When the meeting stops, the **review workspace** takes over: search the
 transcript, ask it questions, curate the action items, and generate the minutes.
 
-## Asking the copilot mid-meeting
+## Two places to ask
 
-**Ask AI** in the title bar (or **Ctrl+K**) opens a conversation with the
-copilot that only you see. Type anything: *「總結一下到目前為止」*, *"what did
-Carmen say about the budget"*, *"what did I miss in the last ten minutes"*, or a
-question about the world. Five one-tap prompts cover the common ones —
-summarise so far, what did I miss, open questions, what should I say next,
-action items so far.
+**About the meeting — the Copilot panel.** The ask box under the Copilot panel
+answers from the meeting itself, and five one-tap prompts cover the common
+asks: summarise so far, what did I miss, open questions, what should I say,
+action items. The answer sees the **whole meeting** — the rolling summary and
+live notes for shape, the last few minutes verbatim, and the passages anywhere
+in the meeting that match the question (the same retrieval the review workspace
+uses), so an hour-old remark is as findable as the last one. Answers cite
+transcript lines as `#42`; click one and the transcript jumps there.
 
-The answer sees the **whole meeting**: the rolling summary and live notes for
-shape, the last few minutes verbatim, and the passages anywhere in the meeting
-that match the question — the same retrieval the review workspace uses, so an
-hour-old remark is as findable as the last one. Answers cite transcript lines as
-`#42`; click one and the transcript jumps there. Follow-ups see the previous
-exchange.
-
-Tick **web** to also search the internet. It is off by default because most
-questions asked during a meeting are about the meeting, and a web search for
-those is noise and cost.
+**About anything else — the Assistant column.** The fifth frame, down the
+right-hand side, is a general assistant: a fact, a figure, a regulation, how to
+word something. It works whether or not a meeting is running, keeps its
+conversation in your browser, and follow-ups see the previous turns. Tick
+**web** to search the internet and get cited sources; untick it and the model
+answers from its own knowledge, flagging anything unverified. If a meeting is
+running it knows your brief for context, but not the transcript — what was
+*said* is the Copilot panel's job. **Assistant** in the title bar (or
+**Ctrl+K**) hides and shows the column.
 
 ## If the app dies mid-meeting
 
@@ -346,7 +348,7 @@ the worst thing this feature could do.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-359 tests, no network and no API keys needed.
+365 tests, no network and no API keys needed.
 
 `test_offline.py` covers the parts that fail silently in a live meeting: JSON
 coercion around model output, the rate limiting that decides when the copilot

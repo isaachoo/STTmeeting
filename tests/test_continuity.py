@@ -529,6 +529,103 @@ class TestContinuityApi(unittest.TestCase):
         response = self.client.post("/api/briefs", json={"brief": {"agenda": "x"}})
         self.assertEqual(response.status_code, 400)
 
+    # ------------------------------------------------------ the assistant
+
+    def _fake_assistant(self, reply="an answer"):
+        llm = FakeLLM(text_reply=reply)
+        original = self.app_module.OpenRouterClient
+        self.app_module.OpenRouterClient = lambda *a, **k: llm
+        self.addCleanup(setattr, self.app_module, "OpenRouterClient", original)
+        saved_key = config.OPENROUTER_API_KEY
+        config.OPENROUTER_API_KEY = "or-test"
+        self.addCleanup(setattr, config, "OPENROUTER_API_KEY", saved_key)
+        return llm
+
+    def test_the_assistant_answers_without_a_meeting(self):
+        llm = self._fake_assistant("強積金上限係 $1,500。")
+        payload = self._json(self.client.post("/api/chat", json={"question": "MPF 上限幾多？"}))
+        self.assertEqual(payload["answer"], "強積金上限係 $1,500。")
+        self.assertFalse(payload["searched"])
+        self.assertGreater(payload["cost_usd"], 0)
+        system = llm.text_calls[-1][0]["content"]
+        self.assertIn("general-purpose assistant", system)
+        self.assertNotIn("What the person is in the middle of", llm.last_prompt())
+
+    def test_the_conversation_travels_with_the_question(self):
+        llm = self._fake_assistant()
+        self.client.post("/api/chat", json={
+            "question": "同英文講一次",
+            "history": [{"role": "user", "content": "MPF 上限？"},
+                        {"role": "assistant", "content": "$1,500"},
+                        {"role": "system", "content": "ignored: only user/assistant turns"}],
+        })
+        self.assertEqual(llm.last_roles(), ["system", "user", "assistant", "user"])
+
+    def test_web_search_only_when_asked_for(self):
+        from copilot import search
+
+        llm = self._fake_assistant("上限係 $1,500 [1]。")
+        called = []
+        saved = (search.available, search.search)
+        search.available = lambda: True
+        search.search = lambda q, max_results=4: called.append(q) or [
+            {"title": "MPFA", "url": "https://mpfa.example", "content": "cap 1500"}]
+        self.addCleanup(setattr, search, "available", saved[0])
+        self.addCleanup(setattr, search, "search", saved[1])
+
+        off = self._json(self.client.post("/api/chat", json={"question": "MPF cap?", "web": False}))
+        self.assertEqual(called, [])
+        self.assertEqual(off["sources"], [])
+
+        on = self._json(self.client.post("/api/chat", json={"question": "MPF cap?", "web": True}))
+        self.assertEqual(called, ["MPF cap?"])
+        self.assertEqual(on["sources"][0]["title"], "MPFA")
+        self.assertTrue(on["searched"])
+        self.assertIn("Web search results", llm.last_prompt())
+
+    def test_a_running_meeting_lends_context_but_not_the_transcript(self):
+        llm = self._fake_assistant()
+        meeting = stored_meeting()
+        from copilot.state import MeetingState
+
+        class Live:
+            meeting_id = meeting["id"]
+            stopped = False
+            state = MeetingState(meeting_id=meeting["id"], brief=brief())
+
+        Live.state.add_utterance("秘密：財務部私底下講過 70 萬", 2)
+        self.app_module._session = Live()
+        self.addCleanup(setattr, self.app_module, "_session", None)
+        self.client.post("/api/chat", json={"question": "what is a headcount?"})
+        sent = llm.last_prompt()
+        self.assertIn("Q3 planning", sent, "the brief is context")
+        self.assertNotIn("70 萬", sent, "what was said stays in the Copilot panel")
+
+    def test_no_key_and_no_question_are_refused(self):
+        self._fake_assistant()
+        self.assertEqual(self.client.post("/api/chat", json={"question": "  "}).status_code, 400)
+        config.OPENROUTER_API_KEY = ""
+        self.assertEqual(self.client.post("/api/chat", json={"question": "x"}).status_code, 400)
+
+    def test_a_model_failure_is_a_readable_error(self):
+        from copilot.llm import LLMError
+
+        class Broken:
+            usage = Usage()
+
+            def chat(self, *a, **k):
+                raise LLMError("upstream is down")
+
+        original = self.app_module.OpenRouterClient
+        self.app_module.OpenRouterClient = lambda *a, **k: Broken()
+        self.addCleanup(setattr, self.app_module, "OpenRouterClient", original)
+        saved_key = config.OPENROUTER_API_KEY
+        config.OPENROUTER_API_KEY = "or-test"
+        self.addCleanup(setattr, config, "OPENROUTER_API_KEY", saved_key)
+        response = self.client.post("/api/chat", json={"question": "x"})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("upstream is down", self._json(response)["error"])
+
     def test_junk_in_a_saved_brief_is_cleaned_like_any_other(self):
         saved = self._json(self.client.post(
             "/api/briefs", json={"name": "n", "brief": {"title": "t", "attendees": "Alan, Bella", "bogus": 1}}

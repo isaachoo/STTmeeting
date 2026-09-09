@@ -92,17 +92,17 @@ const ui = {
   btnPause: el('btn-pause'),
   btnStop: el('btn-stop'),
   btnReview: el('btn-review'),
-  btnAsk: el('btn-ask'),
+  btnChat: el('btn-chat'),
   drawer: el('drawer'),
 
-  askDialog: el('ask-dialog'),
-  askThread: el('ask-thread'),
+  grid: document.querySelector('main.grid'),
   askQuick: el('ask-quick'),
-  askDialogForm: el('ask-dialog-form'),
-  askDialogInput: el('ask-dialog-input'),
-  askWeb: el('ask-web'),
-  btnAskClose: el('btn-ask-close'),
-  btnAskExpand: el('btn-ask-expand'),
+  chatThread: el('chat-thread'),
+  chatForm: el('chat-form'),
+  chatInput: el('chat-input'),
+  chatWeb: el('chat-web'),
+  chatCost: el('chat-cost'),
+  btnChatClear: el('btn-chat-clear'),
 
   resumeBanner: el('resume-banner'),
   resumeText: el('resume-text'),
@@ -496,41 +496,28 @@ ui.askForm.addEventListener('submit', (event) => {
   event.preventDefault();
   const question = ui.inAsk.value.trim();
   if (!question) return;
-  askCopilot(question, false);
+  askCopilot(question);
   ui.inAsk.value = '';
 });
 
 // ------------------------------------------------------------ ask the copilot
 //
-// One question, one answer, from wherever it was typed. Answers arrive as
-// `answer` events and are shown twice: as a card in the Copilot panel, and as
-// a turn in the dialog's conversation thread, which is the roomier place to
-// read a summary or ask a follow-up.
+// Questions about THIS meeting. Answered by the session, which has the
+// transcript; the answer arrives as an `answer` event and is shown as a card in
+// the Copilot panel, with line citations that jump to the transcript.
 
-let askPending = null; // the thread element waiting for the next answer
-
-function askCopilot(question, web) {
+function askCopilot(question) {
   if (!running) {
     log('start a meeting first — there is nothing to ask about yet', true);
     return;
   }
-  socket.emit('ask', { question, web: !!web });
-  log(`asked: ${question}${web ? ' (with web search)' : ''}`);
-
-  if (ui.askThread.querySelector('.empty')) ui.askThread.innerHTML = '';
-  const turn = document.createElement('div');
-  turn.className = 'chat-turn pending';
-  const q = document.createElement('div');
-  q.className = 'chat-q';
-  q.textContent = question;
-  const a = document.createElement('div');
-  a.className = 'chat-a muted';
-  a.textContent = web ? 'searching and reading the transcript…' : 'reading the transcript…';
-  turn.append(q, a);
-  ui.askThread.append(turn);
-  ui.askThread.scrollTop = ui.askThread.scrollHeight;
-  askPending = turn;
+  socket.emit('ask', { question, web: false });
+  log(`asked: ${question}`);
 }
+
+ui.askQuick.querySelectorAll('button[data-q]').forEach((button) => {
+  button.addEventListener('click', () => askCopilot(button.dataset.q));
+});
 
 /* Escape the model's text, then turn [#42] into a button that jumps to line 42.
  * Escaping first matters: the answer goes into innerHTML. */
@@ -560,73 +547,144 @@ function jumpToLine(index) {
   line.classList.add('flash');
 }
 
-function askThreadTurn(payload) {
-  const turn = askPending && askPending.isConnected ? askPending : document.createElement('div');
-  askPending = null;
-  turn.className = 'chat-turn';
-  turn.innerHTML = '';
+// ------------------------------------------------------------ the assistant
+//
+// The right-hand column: a general assistant, not about the meeting. It talks
+// to /api/chat over plain HTTP, works whether or not a meeting is running, and
+// keeps its conversation in this browser (localStorage) -- the server stores
+// nothing, and the recent turns travel with each question so follow-ups work.
 
-  const q = document.createElement('div');
-  q.className = 'chat-q';
-  q.textContent = payload.question;
-  const a = document.createElement('div');
-  a.className = 'chat-a';
-  a.innerHTML = answerHtml(payload.answer);
-  wireCitations(a);
-  turn.append(q, a);
+const CHAT_KEY = 'assistant_chat';
+const CHAT_OPEN_KEY = 'assistant_open';
+let chatTurns = [];        // [{question, answer, sources, cost_usd, at}]
+let chatBusy = false;
 
-  const sources = payload.sources || [];
-  if (sources.length) turn.append(sourceList(payload));
-  const meta = document.createElement('div');
-  meta.className = 'chat-meta';
-  const bits = [timeOf(payload)];
-  if (payload.web_requested && !sources.length) bits.push('web search found nothing usable');
-  if ((payload.cited || []).length) bits.push(`${payload.cited.length} line${payload.cited.length > 1 ? 's' : ''} cited`);
-  meta.textContent = bits.join(' · ');
-  turn.append(meta);
-
-  if (!turn.isConnected) {
-    if (ui.askThread.querySelector('.empty')) ui.askThread.innerHTML = '';
-    ui.askThread.append(turn);
+function loadChat() {
+  try {
+    chatTurns = JSON.parse(localStorage.getItem(CHAT_KEY) || '[]');
+    if (!Array.isArray(chatTurns)) chatTurns = [];
+  } catch (err) {
+    chatTurns = [];
   }
-  ui.askThread.scrollTop = ui.askThread.scrollHeight;
+  renderChat();
 }
 
-function openAskDialog(prefill = '') {
-  if (!running) {
-    log('the copilot can only be asked during a meeting', true);
+function saveChat() {
+  try {
+    localStorage.setItem(CHAT_KEY, JSON.stringify(chatTurns.slice(-60)));
+  } catch (err) { /* storage full or blocked; the thread still shows */ }
+}
+
+function renderChat() {
+  ui.chatThread.innerHTML = '';
+  if (!chatTurns.length) {
+    ui.chatThread.innerHTML = `<p class="empty">
+      Ask anything — a fact, a figure, a regulation, how to word something.
+      Answers come from the model, with a web search when the box is ticked.
+      Questions about what was <em>said</em> in the meeting belong in the Copilot
+      panel, which has the transcript.</p>`;
+    ui.chatCost.textContent = '';
     return;
   }
-  if (!ui.askDialog.open) ui.askDialog.showModal();
-  if (prefill) ui.askDialogInput.value = prefill;
-  ui.askDialogInput.focus();
-  ui.askThread.scrollTop = ui.askThread.scrollHeight;
+  chatTurns.forEach((turn) => ui.chatThread.append(chatTurnElement(turn)));
+  const total = chatTurns.reduce((sum, t) => sum + (t.cost_usd || 0), 0);
+  ui.chatCost.textContent = `${chatTurns.length} asked · ${usd(total)}`;
+  ui.chatThread.scrollTop = ui.chatThread.scrollHeight;
 }
 
-ui.btnAsk.addEventListener('click', () => openAskDialog());
-ui.btnAskExpand.addEventListener('click', () => openAskDialog(ui.inAsk.value.trim()));
-ui.btnAskClose.addEventListener('click', () => ui.askDialog.close());
-ui.askDialog.addEventListener('click', (event) => {
-  // A click on the backdrop (outside the dialog's box) closes it.
-  const box = ui.askDialog.getBoundingClientRect();
-  const inside = event.clientX >= box.left && event.clientX <= box.right
-    && event.clientY >= box.top && event.clientY <= box.bottom;
-  if (!inside) ui.askDialog.close();
-});
-ui.askDialogForm.addEventListener('submit', (event) => {
+function chatTurnElement(turn, pending = false) {
+  const el = document.createElement('div');
+  el.className = `chat-turn${pending ? ' pending' : ''}`;
+  const q = document.createElement('div');
+  q.className = 'chat-q';
+  q.textContent = turn.question;
+  const a = document.createElement('div');
+  a.className = pending ? 'chat-a muted' : 'chat-a';
+  a.textContent = pending ? (turn.web ? 'searching…' : 'thinking…') : (turn.answer || '');
+  el.append(q, a);
+  if (!pending) {
+    if ((turn.sources || []).length) el.append(sourceList(turn));
+    const meta = document.createElement('div');
+    meta.className = 'chat-meta';
+    const bits = [];
+    if (turn.at) bits.push(new Date(turn.at).toLocaleTimeString());
+    if (turn.web_requested && !(turn.sources || []).length) {
+      bits.push(turn.web_enabled ? 'web search found nothing usable' : 'web search off');
+    }
+    if (turn.cost_usd) bits.push(usd(turn.cost_usd));
+    meta.textContent = bits.join(' · ');
+    el.append(meta);
+  }
+  return el;
+}
+
+async function askAssistant(question) {
+  if (chatBusy) return;
+  chatBusy = true;
+  const web = ui.chatWeb.checked && !ui.chatWeb.disabled;
+  if (ui.chatThread.querySelector('.empty')) ui.chatThread.innerHTML = '';
+  const pendingEl = chatTurnElement({ question, web }, true);
+  ui.chatThread.append(pendingEl);
+  ui.chatThread.scrollTop = ui.chatThread.scrollHeight;
+
+  // The recent exchange goes along so "and in Cantonese?" makes sense.
+  const history = [];
+  chatTurns.slice(-5).forEach((t) => {
+    history.push({ role: 'user', content: t.question });
+    history.push({ role: 'assistant', content: t.answer });
+  });
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, web, history }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || response.statusText);
+    chatTurns.push({ ...data, web, at: Date.now() });
+    saveChat();
+    renderChat();
+  } catch (err) {
+    pendingEl.classList.remove('pending');
+    const a = pendingEl.querySelector('.chat-a');
+    a.textContent = `could not answer: ${err.message}`;
+    a.className = 'chat-a warn-text';
+  } finally {
+    chatBusy = false;
+  }
+}
+
+ui.chatForm.addEventListener('submit', (event) => {
   event.preventDefault();
-  const question = ui.askDialogInput.value.trim();
+  const question = ui.chatInput.value.trim();
   if (!question) return;
-  askCopilot(question, ui.askWeb.checked);
-  ui.askDialogInput.value = '';
+  ui.chatInput.value = '';
+  askAssistant(question);
 });
-ui.askQuick.querySelectorAll('button[data-q]').forEach((button) => {
-  button.addEventListener('click', () => askCopilot(button.dataset.q, false));
+
+ui.btnChatClear.addEventListener('click', () => {
+  if (!chatTurns.length) return;
+  if (!confirm('Forget this whole conversation?')) return;
+  chatTurns = [];
+  saveChat();
+  renderChat();
 });
+
+function setChatOpen(open) {
+  ui.grid.classList.toggle('no-chat', !open);
+  ui.btnChat.classList.toggle('primary', false);
+  ui.btnChat.title = open ? 'Hide the assistant column (Ctrl+K)' : 'Show the assistant column (Ctrl+K)';
+  try { localStorage.setItem(CHAT_OPEN_KEY, open ? '1' : '0'); } catch (err) { /* fine */ }
+  if (open) ui.chatInput.focus();
+}
+
+ui.btnChat.addEventListener('click', () => setChatOpen(ui.grid.classList.contains('no-chat')));
 document.addEventListener('keydown', (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault();
-    if (ui.askDialog.open) ui.askDialog.close(); else openAskDialog();
+    if (ui.grid.classList.contains('no-chat')) setChatOpen(true);
+    else ui.chatInput.focus();
   }
 });
 
@@ -1574,13 +1632,10 @@ function setRunning(isRunning) {
   ui.btnPause.hidden = !isRunning;
   ui.btnStop.hidden = !isRunning;
   ui.btnStop.disabled = !isRunning;
-  ui.btnAsk.hidden = !isRunning;
   ui.setup.hidden = isRunning;
   if (isRunning) {
     ui.resumeBanner.hidden = true;
     ui.btnReview.hidden = true;
-  } else if (ui.askDialog.open) {
-    ui.askDialog.close();
   }
   if (!isRunning) setPaused(false);
   streaming = isRunning && !paused && !!workletNode;
@@ -1643,21 +1698,12 @@ function paintSnapshot(snap, fresh) {
   renderSuggestion(snap.speaker_suggestion);
 
   ui.advice.innerHTML = '';
-  ui.askThread.innerHTML = '';
-  askPending = null;
   (snap.cards || []).forEach((card) => {
-    if (card.kind === 'answer') {
-      addAnswerCard(card);
-      if (card.from_user) askThreadTurn(card);
-    } else {
-      addAdviceCard(card);
-    }
+    if (card.kind === 'answer') addAnswerCard(card);
+    else addAdviceCard(card);
   });
   if (!(snap.cards || []).length) {
     ui.advice.innerHTML = '<p class="empty">No suggestions yet.</p>';
-  }
-  if (!ui.askThread.childElementCount) {
-    ui.askThread.innerHTML = '<p class="empty">Nothing asked yet. Answers cite transcript lines as <code>#12</code> — click one to jump to it.</p>';
   }
 
   ui.attendee.innerHTML = '';
@@ -1753,10 +1799,7 @@ socket.on('interim', (payload) => {
 
 socket.on('segment', addSegment);
 socket.on('advice', addAdviceCard);
-socket.on('answer', (payload) => {
-  addAnswerCard(payload);
-  if (payload.from_user) askThreadTurn(payload);
-});
+socket.on('answer', addAnswerCard);
 socket.on('attendee', addAttendeeTurn);
 socket.on('notes', (payload) => renderNotes(payload.notes || {}));
 socket.on('summary', (payload) => { ui.summary.textContent = payload.summary || ''; });
@@ -1817,6 +1860,9 @@ addAttendeeRow();
 restoreBriefDraft();
 loadBriefOptions();
 checkInterrupted();
+loadChat();
+try { setChatOpen(localStorage.getItem(CHAT_OPEN_KEY) !== '0'); } catch (err) { setChatOpen(true); }
+ui.chatInput.blur();
 
 // Restore the language/model chosen last time.
 const savedLanguage = localStorage.getItem('stt_language');

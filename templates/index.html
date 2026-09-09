@@ -22,7 +22,7 @@
     <span id="elapsed" class="mono small">00:00</span>
     <span id="cost-total" class="mono small cost-pill" title="estimated cost so far">$0.0000</span>
     <button id="btn-session" class="ghost small">Session</button>
-    <button id="btn-ask" class="ghost" hidden title="Ask the copilot anything — about this meeting or the world (Ctrl+K)">Ask AI</button>
+    <button id="btn-chat" class="ghost" title="Show or hide the assistant column (Ctrl+K)">Assistant</button>
     <button id="btn-start" class="primary">Start meeting</button>
     <button id="btn-pause" hidden>Pause</button>
     <button id="btn-stop" class="danger" hidden>Stop</button>
@@ -235,10 +235,16 @@
     <div class="panel-body" id="advice">
       <p class="empty">Key points, questions worth asking, and things to watch out for appear here.</p>
     </div>
+    <div class="ask-quick" id="ask-quick">
+      <button type="button" class="ghost small" data-q="總結一下到目前為止講過乜、決定咗乜、仲有乜未解決。">Summarise so far</button>
+      <button type="button" class="ghost small" data-q="我剛才走開咗，最近十分鐘講過乜？">What did I miss?</button>
+      <button type="button" class="ghost small" data-q="到目前為止有乜問題提出咗但未有答案？">Open questions</button>
+      <button type="button" class="ghost small" data-q="以我嘅角色，我而家最應該問乜或者講乜？">What should I say?</button>
+      <button type="button" class="ghost small" data-q="到目前為止有乜 action item？邊個負責？">Action items</button>
+    </div>
     <form id="ask-form" class="ask">
-      <input id="in-ask" type="text" placeholder="Ask the copilot privately, mid-meeting…" autocomplete="off">
+      <input id="in-ask" type="text" placeholder="Ask about this meeting — answers cite the transcript…" autocomplete="off">
       <button type="submit">Ask</button>
-      <button type="button" id="btn-ask-expand" class="ghost" title="Open the conversation view (Ctrl+K)">⤢</button>
     </form>
   </section>
 
@@ -281,36 +287,33 @@
     </div>
   </section>
 
-</main>
-
-<!-- Ask the copilot: a conversation with the meeting, private to you. Same
-     answers land in the Copilot panel; this is the roomier place to work. -->
-<dialog id="ask-dialog" class="ask-dialog">
-  <div class="ask-dialog-head">
-    <div>
-      <strong>Ask the copilot</strong>
-      <span class="muted small">— about this meeting, or anything else. Only you see this.</span>
+  <!-- right column: a general assistant, not about the meeting -->
+  <aside class="panel chat-panel" id="panel-chat">
+    <div class="panel-head">
+      <h2>Assistant</h2>
+      <div class="head-right">
+        <span class="muted small" id="chat-cost"></span>
+        <button id="btn-chat-clear" class="ghost small" title="Forget this conversation">Clear</button>
+      </div>
     </div>
-    <button id="btn-ask-close" class="ghost small" type="button" title="Close (Esc)">✕</button>
-  </div>
-  <div class="ask-quick" id="ask-quick">
-    <button type="button" class="ghost small" data-q="總結一下到目前為止講過乜、決定咗乜、仲有乜未解決。">Summarise so far</button>
-    <button type="button" class="ghost small" data-q="我剛才走開咗，最近十分鐘講過乜？">What did I miss?</button>
-    <button type="button" class="ghost small" data-q="到目前為止有乜問題提出咗但未有答案？">Open questions</button>
-    <button type="button" class="ghost small" data-q="以我嘅角色，我而家最應該問乜或者講乜？">What should I say next?</button>
-    <button type="button" class="ghost small" data-q="到目前為止有乜 action item？邊個負責？">Action items so far</button>
-  </div>
-  <div class="ask-thread" id="ask-thread">
-    <p class="empty">Nothing asked yet. Answers cite transcript lines as <code>#12</code> — click one to jump to it.</p>
-  </div>
-  <form id="ask-dialog-form" class="ask-dialog-form">
-    <input id="ask-dialog-input" type="text" placeholder="Type a question…" autocomplete="off">
-    <label class="toggle small" title="Also search the web. Off by default: most questions are about the meeting, and a search for those is noise and cost.">
-      <input type="checkbox" id="ask-web"> web
-    </label>
-    <button type="submit" class="primary">Ask</button>
-  </form>
-</dialog>
+    <div class="panel-body chat-thread" id="chat-thread">
+      <p class="empty">
+        Ask anything — a fact, a figure, a regulation, how to word something.
+        Answers come from the model, with a web search when the box is ticked.
+        Questions about what was <em>said</em> in the meeting belong in the
+        Copilot panel, which has the transcript.
+      </p>
+    </div>
+    <form id="chat-form" class="ask chat-form">
+      <input id="chat-input" type="text" placeholder="Ask the assistant…" autocomplete="off">
+      <label class="toggle small" title="Search the web and cite the results. Needs TAVILY_API_KEY.">
+        <input type="checkbox" id="chat-web" {% if web_search %}checked{% else %}disabled{% endif %}> web
+      </label>
+      <button type="submit">Ask</button>
+    </form>
+  </aside>
+
+</main>
 
 <!-- Popover for naming a voice. Moved next to whichever chip was clicked. -->
 <div id="name-popover" class="popover" hidden>

@@ -203,11 +203,15 @@ input[type=text]:focus, textarea:focus, select:focus {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* Four meeting panels in a 2x2, and the assistant column down the right. */
+  grid-template-columns: 1fr 1fr minmax(300px, 22%);
   grid-template-rows: 1fr 1fr;
   gap: 10px;
   padding: 10px;
 }
+.grid.no-chat { grid-template-columns: 1fr 1fr; }
+.grid.no-chat .chat-panel { display: none; }
+.chat-panel { grid-column: 3; grid-row: 1 / span 2; }
 
 .panel {
   min-height: 0;
@@ -543,55 +547,23 @@ button.primary#btn-pause { background: var(--warn); border-color: var(--warn); c
 .banner.error { display: flex; align-items: center; gap: 10px; }
 .banner.error[hidden] { display: none; }
 
-/* ------------------------------------------------------------- ask dialog */
+/* ------------------------------------------------------------- assistant */
 
-.ask-dialog {
-  width: min(860px, 94vw);
-  max-height: 88vh;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--panel);
-  color: var(--text);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
-  display: none;
-  flex-direction: column;
-}
-.ask-dialog[open] { display: flex; }
-.ask-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
-.ask-dialog-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel-head);
-  border-radius: 12px 12px 0 0;
-}
+.chat-thread { display: flex; flex-direction: column; }
+.chat-form { flex-wrap: wrap; }
+.chat-form input[type="text"] { flex: 1 1 140px; min-width: 0; }
+.chat-form .toggle { white-space: nowrap; }
 .ask-quick {
+  flex: 0 0 auto;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 10px 14px 0;
-}
-.ask-thread {
-  flex: 1 1 auto;
-  min-height: 220px;
-  overflow-y: auto;
-  padding: 10px 14px;
-}
-.ask-dialog-form {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
+  gap: 5px;
+  padding: 6px 12px 0;
   border-top: 1px solid var(--line);
   background: var(--panel-head);
-  border-radius: 0 0 12px 12px;
 }
-.ask-dialog-form input[type="text"] { flex: 1 1 auto; }
-.ask-dialog-form .toggle { white-space: nowrap; }
+.ask-quick button { font-size: 11px; padding: 3px 8px; }
+#panel-advice .ask { border-top: none; }
 
 .chat-turn {
   padding: 8px 0;
@@ -657,3 +629,6 @@ button.cite:hover { background: var(--accent); color: #10141a; }
   vertical-align: middle;
 }
 .history-row a.act { color: var(--warn); }
+
+.warn-text { color: var(--warn); }
+.good-text { color: var(--good); }
