@@ -212,7 +212,50 @@ def post_settings():
 
 @app.get("/api/meetings")
 def meetings():
-    return jsonify(db.list_meetings())
+    live = _session.meeting_id if (_session and not _session.stopped) else None
+    rows = db.list_meetings()
+    for row in rows:
+        # Never stopped and not the one running now: it was interrupted, and
+        # can be resumed or closed off.
+        row["interrupted"] = row.get("ended_at") is None and row["id"] != live
+        row["running"] = row["id"] == live
+    return jsonify(rows)
+
+
+@app.post("/api/meetings/<int:meeting_id>/finish")
+def finish_interrupted(meeting_id: int):
+    """Close an interrupted meeting without resuming it."""
+    if _is_live(meeting_id):
+        return jsonify({"error": "That meeting is running; press Stop instead."}), 409
+    if not db.close_interrupted(meeting_id):
+        return jsonify({"error": "not an unfinished meeting"}), 404
+    return jsonify({"finished": meeting_id})
+
+
+# --------------------------------------------------------------- saved briefs
+
+
+@app.get("/api/briefs")
+def briefs_list():
+    return jsonify({"briefs": db.list_briefs()})
+
+
+@app.post("/api/briefs")
+def briefs_save():
+    payload = request.get_json(silent=True) or {}
+    brief = Brief.from_payload(payload.get("brief"))
+    name = str(payload.get("name") or brief.title or "").strip()
+    if not name:
+        return jsonify({"error": "give the brief a name"}), 400
+    saved = db.save_brief(name, brief.as_dict())
+    return jsonify({"saved": saved, "briefs": db.list_briefs()})
+
+
+@app.delete("/api/briefs/<int:brief_id>")
+def briefs_delete(brief_id: int):
+    if not db.delete_brief(brief_id):
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"deleted": brief_id, "briefs": db.list_briefs()})
 
 
 @app.get("/api/meetings/<int:meeting_id>")
@@ -681,7 +724,7 @@ def _handle_event(client: Client, raw: str) -> None:
         session = _session
         question = (data.get("question") or "").strip()
         if session is not None and question:
-            session.ask(question[:1000])
+            session.ask(question[:1000], web=bool(data.get("web")))
     elif event == "user_notes":
         if _session is not None:
             _session.set_user_notes((data.get("text") or "")[:100_000])
@@ -731,18 +774,37 @@ def _start_meeting(client: Client, data: dict) -> None:
         client.send("error", {"message": f"Missing configuration: {', '.join(missing)}"})
         return
 
+    # Continuing an interrupted meeting: the stored row supplies the brief and
+    # everything said so far; the form only supplies the transcriber settings.
+    resume = None
+    if data.get("resume_meeting_id") is not None:
+        try:
+            resume = db.get_meeting(int(data["resume_meeting_id"]))
+        except (TypeError, ValueError):
+            resume = None
+        if resume is None:
+            client.send("error", {"message": "That meeting no longer exists."})
+            return
+        if resume.get("ended_at") is not None:
+            client.send("error", {"message": "That meeting was finished; start a new one."})
+            return
+
     with _session_lock:
         if _session is not None and not _session.stopped:
             client.send("error", {"message": "A meeting is already running."})
             return
         try:
+            brief_payload = data.get("brief")
+            if resume is not None and not brief_payload:
+                brief_payload = resume.get("brief_json") or {}
             session = MeetingSession(
-                brief=Brief.from_payload(data.get("brief")),
+                brief=Brief.from_payload(brief_payload),
                 sample_rate=data.get("sample_rate"),
                 emit=_broadcast,
                 language=(data.get("language") or "").strip()[:20],
                 model=(data.get("model") or "").strip()[:40],
                 provider=provider,
+                resume=resume,
             )
         except ValueError as exc:
             client.send("error", {"message": str(exc)})
@@ -750,7 +812,10 @@ def _start_meeting(client: Client, data: dict) -> None:
         _session = session
 
     session.start()
-    log.info("meeting %s started at %s Hz", session.meeting_id, session.sample_rate)
+    log.info(
+        "meeting %s %s at %s Hz",
+        session.meeting_id, "resumed" if resume else "started", session.sample_rate,
+    )
     _broadcast("meeting_started", session.snapshot())
     threading.Thread(
         target=_cost_ticker, args=(session,), name="cost-ticker", daemon=True

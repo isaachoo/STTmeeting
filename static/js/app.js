@@ -92,7 +92,28 @@ const ui = {
   btnPause: el('btn-pause'),
   btnStop: el('btn-stop'),
   btnReview: el('btn-review'),
+  btnAsk: el('btn-ask'),
   drawer: el('drawer'),
+
+  askDialog: el('ask-dialog'),
+  askThread: el('ask-thread'),
+  askQuick: el('ask-quick'),
+  askDialogForm: el('ask-dialog-form'),
+  askDialogInput: el('ask-dialog-input'),
+  askWeb: el('ask-web'),
+  btnAskClose: el('btn-ask-close'),
+  btnAskExpand: el('btn-ask-expand'),
+
+  resumeBanner: el('resume-banner'),
+  resumeText: el('resume-text'),
+  btnResume: el('btn-resume'),
+  btnFinishInterrupted: el('btn-finish-interrupted'),
+
+  savedBrief: el('in-saved-brief'),
+  btnBriefLoad: el('btn-brief-load'),
+  btnBriefSave: el('btn-brief-save'),
+  btnBriefDelete: el('btn-brief-delete'),
+  briefHint: el('brief-hint'),
 
   setup: el('setup'),
   inTitle: el('in-title'),
@@ -386,20 +407,27 @@ function stopCapture() {
 
 // -------------------------------------------------------------------- actions
 
-ui.btnStart.addEventListener('click', async () => {
+ui.btnStart.addEventListener('click', () => startMeeting(null));
+
+/* Start a new meeting, or -- with `resumeId` -- carry on an interrupted one.
+ * Same microphone flow either way; the server tells them apart. */
+async function startMeeting(resumeId) {
   ui.btnStart.disabled = true;
+  ui.btnResume.disabled = true;
   ui.statusText.textContent = 'asking for the microphone…';
   try {
     const brief = collectBrief();
     const sampleRate = await startCapture();
     log(`microphone open at ${sampleRate} Hz`);
-    socket.emit('start_meeting', {
+    const payload = {
       brief,
       sample_rate: sampleRate,
       language: ui.inLanguage.value,
       model: ui.inModel.value,
       provider: ui.inProvider.value,
-    });
+    };
+    if (resumeId) payload.resume_meeting_id = resumeId;
+    socket.emit('start_meeting', payload);
     // Remember the choice for next time.
     localStorage.setItem('stt_language', ui.inLanguage.value);
     localStorage.setItem('stt_model', ui.inModel.value);
@@ -407,10 +435,11 @@ ui.btnStart.addEventListener('click', async () => {
   } catch (err) {
     stopCapture();
     ui.btnStart.disabled = false;
+    ui.btnResume.disabled = false;
     ui.statusText.textContent = 'microphone blocked';
     log(`could not open the microphone: ${err.message}`, true);
   }
-});
+}
 
 ui.btnPause.addEventListener('click', () => {
   // Optimistic locally so the button responds instantly; the server's `paused`
@@ -436,9 +465,14 @@ function addPauseMarker(payload) {
   clearIfEmpty(ui.transcript);
   const marker = document.createElement('p');
   marker.className = 'pause-marker';
-  marker.textContent = payload.paused
-    ? `⏸ paused at ${clockFromSeconds(payload.at || 0)}`
-    : `▶ resumed at ${clockFromSeconds(payload.at || 0)}`;
+  const at = clockFromSeconds(payload.at || 0);
+  if (payload.resumed) {
+    // Continued after an interruption: the gap above this line is the time
+    // the app was not running, not a silence in the room.
+    marker.textContent = `▶ continued after an interruption at ${at}`;
+  } else {
+    marker.textContent = payload.paused ? `⏸ paused at ${at}` : `▶ resumed at ${at}`;
+  }
   ui.transcript.append(marker);
   if (ui.autoscroll.checked) ui.transcript.scrollTop = ui.transcript.scrollHeight;
 }
@@ -462,10 +496,335 @@ ui.askForm.addEventListener('submit', (event) => {
   event.preventDefault();
   const question = ui.inAsk.value.trim();
   if (!question) return;
-  socket.emit('ask', { question });
+  askCopilot(question, false);
   ui.inAsk.value = '';
-  log(`asked: ${question}`);
 });
+
+// ------------------------------------------------------------ ask the copilot
+//
+// One question, one answer, from wherever it was typed. Answers arrive as
+// `answer` events and are shown twice: as a card in the Copilot panel, and as
+// a turn in the dialog's conversation thread, which is the roomier place to
+// read a summary or ask a follow-up.
+
+let askPending = null; // the thread element waiting for the next answer
+
+function askCopilot(question, web) {
+  if (!running) {
+    log('start a meeting first — there is nothing to ask about yet', true);
+    return;
+  }
+  socket.emit('ask', { question, web: !!web });
+  log(`asked: ${question}${web ? ' (with web search)' : ''}`);
+
+  if (ui.askThread.querySelector('.empty')) ui.askThread.innerHTML = '';
+  const turn = document.createElement('div');
+  turn.className = 'chat-turn pending';
+  const q = document.createElement('div');
+  q.className = 'chat-q';
+  q.textContent = question;
+  const a = document.createElement('div');
+  a.className = 'chat-a muted';
+  a.textContent = web ? 'searching and reading the transcript…' : 'reading the transcript…';
+  turn.append(q, a);
+  ui.askThread.append(turn);
+  ui.askThread.scrollTop = ui.askThread.scrollHeight;
+  askPending = turn;
+}
+
+/* Escape the model's text, then turn [#42] into a button that jumps to line 42.
+ * Escaping first matters: the answer goes into innerHTML. */
+function answerHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text || '';
+  return div.innerHTML.replace(
+    /\[#(\d+)\]/g,
+    (whole, index) => `<button class="cite" data-line="${index}" title="jump to line ${index}">#${index}</button>`
+  );
+}
+
+function wireCitations(container) {
+  container.querySelectorAll('button.cite').forEach((button) => {
+    button.addEventListener('click', () => jumpToLine(Number(button.dataset.line)));
+  });
+}
+
+function jumpToLine(index) {
+  const line = ui.transcript.querySelector(`.line[data-index="${index}"]`);
+  if (!line) return;
+  if (line.classList.contains('hidden-by-filter')) clearSpeakerFilter();
+  ui.autoscroll.checked = false; // otherwise the next segment yanks it away
+  line.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  line.classList.remove('flash');
+  void line.offsetWidth; // restart the animation if the same line is hit twice
+  line.classList.add('flash');
+}
+
+function askThreadTurn(payload) {
+  const turn = askPending && askPending.isConnected ? askPending : document.createElement('div');
+  askPending = null;
+  turn.className = 'chat-turn';
+  turn.innerHTML = '';
+
+  const q = document.createElement('div');
+  q.className = 'chat-q';
+  q.textContent = payload.question;
+  const a = document.createElement('div');
+  a.className = 'chat-a';
+  a.innerHTML = answerHtml(payload.answer);
+  wireCitations(a);
+  turn.append(q, a);
+
+  const sources = payload.sources || [];
+  if (sources.length) turn.append(sourceList(payload));
+  const meta = document.createElement('div');
+  meta.className = 'chat-meta';
+  const bits = [timeOf(payload)];
+  if (payload.web_requested && !sources.length) bits.push('web search found nothing usable');
+  if ((payload.cited || []).length) bits.push(`${payload.cited.length} line${payload.cited.length > 1 ? 's' : ''} cited`);
+  meta.textContent = bits.join(' · ');
+  turn.append(meta);
+
+  if (!turn.isConnected) {
+    if (ui.askThread.querySelector('.empty')) ui.askThread.innerHTML = '';
+    ui.askThread.append(turn);
+  }
+  ui.askThread.scrollTop = ui.askThread.scrollHeight;
+}
+
+function openAskDialog(prefill = '') {
+  if (!running) {
+    log('the copilot can only be asked during a meeting', true);
+    return;
+  }
+  if (!ui.askDialog.open) ui.askDialog.showModal();
+  if (prefill) ui.askDialogInput.value = prefill;
+  ui.askDialogInput.focus();
+  ui.askThread.scrollTop = ui.askThread.scrollHeight;
+}
+
+ui.btnAsk.addEventListener('click', () => openAskDialog());
+ui.btnAskExpand.addEventListener('click', () => openAskDialog(ui.inAsk.value.trim()));
+ui.btnAskClose.addEventListener('click', () => ui.askDialog.close());
+ui.askDialog.addEventListener('click', (event) => {
+  // A click on the backdrop (outside the dialog's box) closes it.
+  const box = ui.askDialog.getBoundingClientRect();
+  const inside = event.clientX >= box.left && event.clientX <= box.right
+    && event.clientY >= box.top && event.clientY <= box.bottom;
+  if (!inside) ui.askDialog.close();
+});
+ui.askDialogForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const question = ui.askDialogInput.value.trim();
+  if (!question) return;
+  askCopilot(question, ui.askWeb.checked);
+  ui.askDialogInput.value = '';
+});
+ui.askQuick.querySelectorAll('button[data-q]').forEach((button) => {
+  button.addEventListener('click', () => askCopilot(button.dataset.q, false));
+});
+document.addEventListener('keydown', (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    if (ui.askDialog.open) ui.askDialog.close(); else openAskDialog();
+  }
+});
+
+// -------------------------------------------------------- interrupted meetings
+//
+// A meeting that was never stopped -- the app or the laptop died -- is offered
+// for resuming. Everything said is already in the database; resuming continues
+// the same meeting with the copilot's memory restored.
+
+let interrupted = null; // the most recent unfinished meeting, if any
+
+async function checkInterrupted() {
+  try {
+    const response = await fetch('/api/meetings');
+    const meetings = await response.json();
+    interrupted = meetings.find((m) => m.interrupted) || null;
+  } catch (err) {
+    interrupted = null;
+  }
+  renderResumeBanner();
+}
+
+function renderResumeBanner() {
+  if (!interrupted || running) {
+    ui.resumeBanner.hidden = true;
+    return;
+  }
+  const when = interrupted.started_at
+    ? new Date(interrupted.started_at * 1000).toLocaleString() : '';
+  const title = interrupted.title || `Meeting ${interrupted.id}`;
+  ui.resumeText.textContent =
+    `“${title}” (${when}, ${interrupted.segments || 0} lines) was never stopped. `
+    + 'Everything said is saved. Continue it, or close it and review later.';
+  ui.btnResume.disabled = false;
+  ui.resumeBanner.hidden = false;
+}
+
+async function resumeMeeting(meeting) {
+  // The stored brief goes into the form so it can be adjusted before continuing;
+  // the transcriber settings are whatever the form says now.
+  fillBrief(meeting.brief_json || {});
+  if (meeting.language) ui.inLanguage.value = meeting.language;
+  if (meeting.provider) ui.inProvider.value = meeting.provider;
+  await startMeeting(meeting.id);
+}
+
+async function finishInterrupted(meeting) {
+  try {
+    const response = await fetch(`/api/meetings/${meeting.id}/finish`, { method: 'POST' });
+    if (!response.ok) throw new Error((await response.json()).error || response.statusText);
+    log(`meeting ${meeting.id} closed — it is in Past meetings for review`);
+  } catch (err) {
+    log(`could not close meeting ${meeting.id}: ${err.message}`, true);
+  }
+  await checkInterrupted();
+  loadHistory();
+}
+
+ui.btnResume.addEventListener('click', () => { if (interrupted) resumeMeeting(interrupted); });
+ui.btnFinishInterrupted.addEventListener('click', () => { if (interrupted) finishInterrupted(interrupted); });
+
+// ------------------------------------------------------------- saved briefs
+//
+// A meeting background typed in advance and kept by name. The list also offers
+// the brief of every past meeting, so a recurring meeting is one click.
+
+let briefOptions = { saved: [], meetings: [] };
+
+async function loadBriefOptions() {
+  try {
+    const [briefsRes, meetingsRes] = await Promise.all([fetch('/api/briefs'), fetch('/api/meetings')]);
+    briefOptions.saved = (await briefsRes.json()).briefs || [];
+    briefOptions.meetings = ((await meetingsRes.json()) || [])
+      .filter((m) => m.brief_json && Object.values(m.brief_json).some((v) => v && String(v).length && !(Array.isArray(v) && !v.length)));
+  } catch (err) {
+    log(`could not load saved backgrounds: ${err.message}`, true);
+    return;
+  }
+  const current = ui.savedBrief.value;
+  ui.savedBrief.innerHTML = '<option value="">Saved backgrounds…</option>';
+  if (briefOptions.saved.length) {
+    const group = document.createElement('optgroup');
+    group.label = 'Saved';
+    briefOptions.saved.forEach((item) => {
+      const option = document.createElement('option');
+      option.value = `saved:${item.id}`;
+      option.textContent = item.name;
+      group.append(option);
+    });
+    ui.savedBrief.append(group);
+  }
+  if (briefOptions.meetings.length) {
+    const group = document.createElement('optgroup');
+    group.label = 'From a past meeting';
+    briefOptions.meetings.slice(0, 30).forEach((meeting) => {
+      const option = document.createElement('option');
+      option.value = `meeting:${meeting.id}`;
+      const when = meeting.started_at ? new Date(meeting.started_at * 1000).toLocaleDateString() : '';
+      option.textContent = `${meeting.title || `Meeting ${meeting.id}`} (${when})`;
+      group.append(option);
+    });
+    ui.savedBrief.append(group);
+  }
+  if ([...ui.savedBrief.options].some((o) => o.value === current)) ui.savedBrief.value = current;
+  ui.btnBriefDelete.hidden = !ui.savedBrief.value.startsWith('saved:');
+}
+
+function selectedBrief() {
+  const value = ui.savedBrief.value;
+  if (value.startsWith('saved:')) {
+    const item = briefOptions.saved.find((b) => String(b.id) === value.slice(6));
+    return item ? { brief: item.brief, name: item.name, saved: item } : null;
+  }
+  if (value.startsWith('meeting:')) {
+    const meeting = briefOptions.meetings.find((m) => String(m.id) === value.slice(8));
+    return meeting ? { brief: meeting.brief_json, name: meeting.title } : null;
+  }
+  return null;
+}
+
+ui.savedBrief.addEventListener('change', () => {
+  ui.btnBriefDelete.hidden = !ui.savedBrief.value.startsWith('saved:');
+});
+
+ui.btnBriefLoad.addEventListener('click', () => {
+  const chosen = selectedBrief();
+  if (!chosen) {
+    ui.briefHint.textContent = 'pick one first';
+    return;
+  }
+  fillBrief(chosen.brief);
+  saveBriefDraft();
+  ui.briefHint.textContent = `loaded “${chosen.name || 'brief'}”`;
+  setTimeout(() => { ui.briefHint.textContent = ''; }, 2500);
+});
+
+ui.btnBriefSave.addEventListener('click', async () => {
+  const brief = collectBrief();
+  const suggested = (selectedBrief() && selectedBrief().saved ? selectedBrief().name : brief.title) || '';
+  const name = prompt('Save this background as:', suggested);
+  if (name === null) return;
+  if (!name.trim()) {
+    ui.briefHint.textContent = 'a name is needed';
+    return;
+  }
+  try {
+    const response = await fetch('/api/briefs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim(), brief }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || response.statusText);
+    await loadBriefOptions();
+    ui.savedBrief.value = `saved:${data.saved.id}`;
+    ui.btnBriefDelete.hidden = false;
+    ui.briefHint.textContent = `saved “${data.saved.name}”`;
+    setTimeout(() => { ui.briefHint.textContent = ''; }, 2500);
+  } catch (err) {
+    ui.briefHint.textContent = `could not save: ${err.message}`;
+  }
+});
+
+ui.btnBriefDelete.addEventListener('click', async () => {
+  const chosen = selectedBrief();
+  if (!chosen || !chosen.saved) return;
+  if (!confirm(`Delete the saved background “${chosen.name}”?`)) return;
+  try {
+    const response = await fetch(`/api/briefs/${chosen.saved.id}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error((await response.json()).error || response.statusText);
+    await loadBriefOptions();
+    ui.briefHint.textContent = 'deleted';
+    setTimeout(() => { ui.briefHint.textContent = ''; }, 2000);
+  } catch (err) {
+    ui.briefHint.textContent = `could not delete: ${err.message}`;
+  }
+});
+
+/* Whatever is typed into the form survives a reload, so preparation done an
+ * hour before the meeting is not lost to an accidental refresh. */
+const DRAFT_KEY = 'brief_draft';
+let draftTimer = null;
+function saveBriefDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(collectBrief())); } catch (err) { /* storage full or blocked */ }
+  }, 400);
+}
+function restoreBriefDraft() {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (!raw) return;
+    const draft = JSON.parse(raw);
+    if (draft && Object.values(draft).some((v) => (Array.isArray(v) ? v.length : v))) fillBrief(draft);
+  } catch (err) { /* a corrupt draft is not worth an error */ }
+}
+ui.setup.addEventListener('input', saveBriefDraft);
+ui.setup.addEventListener('change', saveBriefDraft);
 
 let notesSaveTimer = null;
 ui.userNotes.addEventListener('input', () => {
@@ -590,10 +949,15 @@ ui.btnSaveMd.addEventListener('click', () => saveSession('md'));
 ui.btnSaveJson.addEventListener('click', () => saveSession('json'));
 ui.btnRefreshHistory.addEventListener('click', loadHistory);
 
+let historyRequest = 0;
 async function loadHistory() {
+  // Two loads can overlap (open the drawer, then close a meeting a moment
+  // later); only the newest response may paint, or a stale one wins.
+  const mine = ++historyRequest;
   try {
     const response = await fetch('/api/meetings');
     const meetings = await response.json();
+    if (mine !== historyRequest) return;
     ui.history.innerHTML = '';
     if (!meetings.length) {
       ui.history.innerHTML = '<p class="muted small">Nothing saved yet.</p>';
@@ -615,7 +979,41 @@ async function loadHistory() {
       meta.textContent = `${when} · ${mins} min · ${meeting.segments || 0} lines`;
       left.append(title, meta);
 
+      if (meeting.interrupted) {
+        const badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = 'interrupted';
+        title.append(badge);
+      } else if (meeting.running) {
+        const badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = 'running';
+        title.append(badge);
+      }
+
       const links = document.createElement('div');
+      if (meeting.interrupted && !running) {
+        const resume = document.createElement('a');
+        resume.href = '#';
+        resume.className = 'act';
+        resume.textContent = 'Resume';
+        resume.title = 'Continue this meeting where it stopped';
+        resume.addEventListener('click', (event) => {
+          event.preventDefault();
+          ui.drawer.hidden = true;
+          resumeMeeting(meeting);
+        });
+        const finish = document.createElement('a');
+        finish.href = '#';
+        finish.className = 'act';
+        finish.textContent = 'Close';
+        finish.title = 'Mark it finished without resuming';
+        finish.addEventListener('click', (event) => {
+          event.preventDefault();
+          finishInterrupted(meeting);
+        });
+        links.append(resume, finish);
+      }
       const review = document.createElement('a');
       review.href = `/review/${meeting.id}`;
       review.textContent = 'Review';
@@ -964,10 +1362,14 @@ function addAnswerCard(payload) {
 
   const answer = document.createElement('p');
   answer.className = 'a';
-  answer.textContent = payload.answer;
+  answer.innerHTML = answerHtml(payload.answer);
+  wireCitations(answer);
 
   card.append(time, heading, question, answer);
-  card.append(sourceList(payload));
+  // A meeting question answered from the transcript has no web sources, and
+  // that is not a shortcoming worth a flag; only show the flag when the user
+  // asked for the web and got nothing.
+  if ((payload.sources || []).length || payload.web_requested) card.append(sourceList(payload));
   ui.advice.prepend(card);
   trim(ui.advice);
 }
@@ -1172,7 +1574,14 @@ function setRunning(isRunning) {
   ui.btnPause.hidden = !isRunning;
   ui.btnStop.hidden = !isRunning;
   ui.btnStop.disabled = !isRunning;
+  ui.btnAsk.hidden = !isRunning;
   ui.setup.hidden = isRunning;
+  if (isRunning) {
+    ui.resumeBanner.hidden = true;
+    ui.btnReview.hidden = true;
+  } else if (ui.askDialog.open) {
+    ui.askDialog.close();
+  }
   if (!isRunning) setPaused(false);
   streaming = isRunning && !paused && !!workletNode;
 }
@@ -1190,7 +1599,12 @@ socket.on('__close', () => {
   log('lost the server connection', true);
 });
 
-socket.on('snapshot', (snap) => {
+socket.on('snapshot', (snap) => paintSnapshot(snap, false));
+
+/* Paint the whole page from a server snapshot. Used on connect and reconnect,
+ * and -- with `fresh` -- when a meeting starts, because a *resumed* meeting
+ * starts with a transcript, cards and notes already in it. */
+function paintSnapshot(snap, fresh) {
   if (!snap || !snap.meeting_id) {
     setRunning(false);
     if (!ui.attendees.childElementCount) addAttendeeRow();
@@ -1204,7 +1618,11 @@ socket.on('snapshot', (snap) => {
   knownSpeakers = new Set();
   speakerFilter.clear();
   ui.filterBar.hidden = true;
-  fillBrief(snap.brief);
+  // A running meeting's brief always wins. After a meeting has finished, keep
+  // whatever the user has started typing for the next one instead.
+  let hasDraft = false;
+  try { hasDraft = !!localStorage.getItem(DRAFT_KEY); } catch (err) { hasDraft = false; }
+  if (snap.running || !hasDraft) fillBrief(snap.brief);
   if (snap.language) ui.inLanguage.value = snap.language;
   if (snap.provider) {
     provider = snap.provider;
@@ -1212,7 +1630,12 @@ socket.on('snapshot', (snap) => {
   }
 
   ui.transcript.innerHTML = '';
-  (snap.segments || []).forEach(addSegment);
+  // Lines and pause/continue seams, in the order they happened.
+  const items = [
+    ...(snap.segments || []).map((seg) => ({ at: seg.at || 0, order: 1, seg })),
+    ...(snap.markers || []).map((marker) => ({ at: marker.at || 0, order: 0, marker })),
+  ].sort((a, b) => (a.at - b.at) || (a.order - b.order));
+  items.forEach((item) => (item.seg ? addSegment(item.seg) : addPauseMarker(item.marker)));
   if (!(snap.segments || []).length) {
     ui.transcript.innerHTML = '<p class="empty">Nothing transcribed yet.</p>';
   }
@@ -1220,12 +1643,21 @@ socket.on('snapshot', (snap) => {
   renderSuggestion(snap.speaker_suggestion);
 
   ui.advice.innerHTML = '';
+  ui.askThread.innerHTML = '';
+  askPending = null;
   (snap.cards || []).forEach((card) => {
-    if (card.kind === 'answer') addAnswerCard(card);
-    else addAdviceCard(card);
+    if (card.kind === 'answer') {
+      addAnswerCard(card);
+      if (card.from_user) askThreadTurn(card);
+    } else {
+      addAdviceCard(card);
+    }
   });
   if (!(snap.cards || []).length) {
     ui.advice.innerHTML = '<p class="empty">No suggestions yet.</p>';
+  }
+  if (!ui.askThread.childElementCount) {
+    ui.askThread.innerHTML = '<p class="empty">Nothing asked yet. Answers cite transcript lines as <code>#12</code> — click one to jump to it.</p>';
   }
 
   ui.attendee.innerHTML = '';
@@ -1252,8 +1684,10 @@ socket.on('snapshot', (snap) => {
     // page, so the meeting continues on the server but deaf to this one).
     setRunning(true);
     setPaused(!!snap.paused);
-    if (workletNode) {
-      ui.statusText.textContent = 'meeting running';
+    if (fresh) {
+      ui.statusText.textContent = snap.resumed ? 'continuing the meeting…' : 'listening…';
+    } else if (workletNode) {
+      ui.statusText.textContent = snap.resumed ? 'meeting running (continued)' : 'meeting running';
       log('socket reconnected; still sending audio');
     } else {
       ui.statusText.textContent = 'meeting running — this tab is not sending audio';
@@ -1264,25 +1698,18 @@ socket.on('snapshot', (snap) => {
     setRunning(false);
     ui.statusText.textContent = 'last meeting finished';
   }
-});
+}
 
 socket.on('meeting_started', (snap) => {
-  setRunning(true);
-  meetingId = snap.meeting_id;
-  provider = snap.provider || ui.inProvider.value;
-  startedAtMs = Date.now();
-  speakerNames = {};
-  knownSpeakers = new Set();
-  speakerFilter.clear();
-  ui.filterBar.hidden = true;
-  setPaused(false);
-  renderSpeakerChips();
-  ui.transcript.innerHTML = '<p class="empty">Listening…</p>';
-  ui.advice.innerHTML = '<p class="empty">No suggestions yet.</p>';
-  ui.attendee.innerHTML = '<p class="empty">Nothing to say yet.</p>';
-  ui.notes.innerHTML = '<p class="empty">Nothing worth noting yet.</p>';
-  ui.suggestion.hidden = true;
-  log(`meeting ${snap.meeting_id} started`);
+  // The same painter as a reconnect: a brand-new meeting paints empty panels,
+  // a resumed one paints everything said before the interruption.
+  paintSnapshot(snap, true);
+  if (!(snap.segments || []).length) {
+    ui.transcript.innerHTML = '<p class="empty">Listening…</p>';
+  }
+  log(snap.resumed
+    ? `meeting ${snap.meeting_id} continued — ${(snap.segments || []).length} lines restored`
+    : `meeting ${snap.meeting_id} started`);
 });
 
 socket.on('meeting_stopped', (payload) => {
@@ -1295,6 +1722,8 @@ socket.on('meeting_stopped', (payload) => {
   log(`meeting ${payload.meeting_id} finished and saved`);
   showReviewLink(payload.meeting_id);
   loadHistory();
+  loadBriefOptions();
+  checkInterrupted();
 });
 
 /* The meeting is over but the work on it is not. This is the one moment the user
@@ -1324,7 +1753,10 @@ socket.on('interim', (payload) => {
 
 socket.on('segment', addSegment);
 socket.on('advice', addAdviceCard);
-socket.on('answer', addAnswerCard);
+socket.on('answer', (payload) => {
+  addAnswerCard(payload);
+  if (payload.from_user) askThreadTurn(payload);
+});
 socket.on('attendee', addAttendeeTurn);
 socket.on('notes', (payload) => renderNotes(payload.notes || {}));
 socket.on('summary', (payload) => { ui.summary.textContent = payload.summary || ''; });
@@ -1341,6 +1773,10 @@ socket.on('speakers', (payload) => {
 socket.on('paused', (payload) => {
   setPaused(!!payload.paused);
   addPauseMarker(payload);
+  if (payload.resumed) {
+    log('continuing the interrupted meeting — everything before this point was already saved');
+    return;
+  }
   ui.statusText.textContent = payload.paused ? 'paused — microphone muted' : 'listening';
   log(payload.paused ? 'paused; no audio is being sent or billed' : 'resumed');
 });
@@ -1374,8 +1810,13 @@ window.addEventListener('beforeunload', () => {
   if (running) stopCapture();
 });
 
-// Start with one empty attendee row so the field is obviously fillable.
+// Start with one empty attendee row so the field is obviously fillable, then
+// bring back anything typed before a reload, and offer saved backgrounds and
+// any meeting that was cut off.
 addAttendeeRow();
+restoreBriefDraft();
+loadBriefOptions();
+checkInterrupted();
 
 // Restore the language/model chosen last time.
 const savedLanguage = localStorage.getItem('stt_language');

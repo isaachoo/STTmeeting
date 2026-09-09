@@ -27,13 +27,20 @@ MAX_SAMPLE_RATE = 48000
 class MeetingSession:
     def __init__(self, brief: Brief, sample_rate: int, emit,
                  language: str | None = None, model: str | None = None,
-                 provider: str | None = None):
+                 provider: str | None = None, resume: dict | None = None):
+        """`resume` is a stored meeting (from db.get_meeting) that was never
+        stopped -- the process died, the laptop slept. The session continues it:
+        same meeting id, same transcript, the copilot's memory restored, and
+        the clock and the cost carrying on from where they were."""
         self.sample_rate = _validate_sample_rate(sample_rate)
         self._emit = emit
         self._lock = threading.Lock()
-        self.language = (language or config.DEEPGRAM_LANGUAGE).strip()
-        self.provider = (provider or config.STT_PROVIDER).strip().lower()
+        self.language = (language or (resume or {}).get("language") or config.DEEPGRAM_LANGUAGE).strip()
+        self.provider = (provider or (resume or {}).get("provider") or config.STT_PROVIDER).strip().lower()
         chosen_model = (model or "").strip()
+        self.resumed = resume is not None
+        # Speech already billed before an interruption; cost() adds it back on.
+        self._audio_offset = float((resume or {}).get("audio_seconds") or 0.0)
         # Paused means the microphone is muted, not that the meeting ended: the
         # Deepgram socket stays open on keepalives, so no audio is billed and
         # resuming needs no reconnect and no second microphone prompt.
@@ -42,23 +49,51 @@ class MeetingSession:
         self.stt_status = {"state": "starting", "detail": ""}
         self.cards: list[dict] = []  # copilot panel: advice + answers
         self.attendee_turns: list[dict] = []  # what the AI attendee has said
+        # Pauses and resumptions, so a reloaded page can draw the seams in the
+        # transcript where they belong instead of losing them.
+        self.markers: list[dict] = []
         self.interim = ""
         self.error: str | None = None
         # An event rather than a flag, so the cost ticker can wait on it and exit
         # the moment the meeting ends instead of sleeping through its interval.
         self._stopped = threading.Event()
 
-        self.meeting_id = db.create_meeting(
-            title=brief.title,
-            brief=brief.as_dict(),
-            language=self.language,
-            stt_model=chosen_model,
-        )
-        self.state = MeetingState(meeting_id=self.meeting_id, brief=brief)
+        if resume is None:
+            self.meeting_id = db.create_meeting(
+                title=brief.title,
+                brief=brief.as_dict(),
+                language=self.language,
+                stt_model=chosen_model,
+            )
+            self.state = MeetingState(meeting_id=self.meeting_id, brief=brief)
+        else:
+            self.meeting_id = int(resume["id"])
+            # Keep the original start so line timestamps stay continuous: a
+            # meeting interrupted at 1:20:00 and resumed resumes at 1:20:xx plus
+            # the gap, which is the truth of what happened.
+            self.state = MeetingState(
+                meeting_id=self.meeting_id,
+                brief=brief,
+                started_at=float(resume.get("started_at") or time.time()),
+            )
+            self.state.load_stored(resume)
+            # Anything the copilot said before the break is still on screen.
+            for event in resume.get("events") or []:
+                kind, payload = event.get("kind"), event.get("payload") or {}
+                if kind in ("advice", "answer"):
+                    self.cards.append({"kind": kind, **payload})
+                elif kind == "attendee":
+                    self.attendee_turns.append(payload)
+                elif kind in ("pause", "resume") and "at" in payload:
+                    self.markers.append(payload)
+            del self.cards[:-60]
+            del self.attendee_turns[:-40]
 
         # The client owns the usage counter; cost() reads it back rather than
         # keeping a second copy that could drift out of step.
         self.llm = OpenRouterClient()
+        if resume is not None:
+            self.llm.usage.seed(resume.get("usage_json") or {})
         self.engine = CopilotEngine(self.state, self.llm, self._engine_emit)
 
         self.stt = create_engine(
@@ -109,6 +144,7 @@ class MeetingSession:
             self._emit("interim", {"text": ""})
 
         payload = {"paused": paused, "at": round(self.state.elapsed(), 1)}
+        self.markers.append(payload)
         db.add_event(self.meeting_id, "pause", payload)
         self._emit("paused", payload)
 
@@ -116,6 +152,13 @@ class MeetingSession:
 
     def start(self) -> None:
         self.stt.start()
+        if self.resumed:
+            # A visible seam in the transcript, so nobody later mistakes the gap
+            # for a silence. Rendered by the page the same way a pause is.
+            payload = {"paused": False, "resumed": True, "at": round(self.state.elapsed(), 1)}
+            self.markers.append(payload)
+            db.add_event(self.meeting_id, "resume", payload)
+            self._emit("paused", payload)
 
     def feed_audio(self, chunk: bytes) -> None:
         # Dropping the audio here rather than in the browser means the cost
@@ -150,19 +193,23 @@ class MeetingSession:
         with self.state.lock:
             notes = dict(self.state.notes)
             summary = self.state.rolling_summary
+            summarised_upto = self.state.summarised_upto
             speakers = dict(self.state.speaker_names)
         db.save_notes(self.meeting_id, notes)
-        db.save_summary(self.meeting_id, summary)
+        db.save_summary(self.meeting_id, summary, summarised_upto)
         db.save_speakers(self.meeting_id, speakers)
         db.finish_meeting(
-            self.meeting_id, self.stt.audio_seconds, self.llm.usage.snapshot(), self.stt.model
+            self.meeting_id,
+            self._audio_offset + self.stt.audio_seconds,
+            self.llm.usage.snapshot(),
+            self.stt.model,
         )
 
         self._emit("cost", self.cost())
         self._emit("meeting_stopped", {"meeting_id": self.meeting_id, "notes": notes})
 
-    def ask(self, question: str) -> None:
-        self.engine.ask(question)
+    def ask(self, question: str, web: bool = False) -> None:
+        self.engine.ask(question, web=web)
 
     def set_user_notes(self, text: str) -> None:
         with self.state.lock:
@@ -250,7 +297,7 @@ class MeetingSession:
         elif event == "notes":
             db.save_notes(self.meeting_id, payload.get("notes") or {})
         elif event == "summary":
-            db.save_summary(self.meeting_id, payload.get("summary") or "")
+            db.save_summary(self.meeting_id, payload.get("summary") or "", payload.get("upto"))
         self._emit(event, payload)
         if event in ("advice", "answer", "attendee", "notes", "usage"):
             self._emit("cost", self.cost())
@@ -258,7 +305,7 @@ class MeetingSession:
     # -------------------------------------------------------------------- cost
 
     def cost(self) -> dict:
-        audio_minutes = self.stt.audio_seconds / 60.0
+        audio_minutes = (self._audio_offset + self.stt.audio_seconds) / 60.0
         # Each engine prices its own minute -- the local one is free, and saying
         # otherwise would make the readout a lie.
         rate = self.stt.usd_per_minute
@@ -289,6 +336,7 @@ class MeetingSession:
                 "brief": self.state.brief.as_dict(),
                 "title": self.state.brief.title,
                 "running": not self.stopped,
+                "resumed": self.resumed,
                 "paused": self.paused,
                 "language": self.language,
                 "provider": self.provider,
@@ -296,6 +344,7 @@ class MeetingSession:
                 "error": self.error,
                 "interim": self.interim,
                 "segments": [s.as_dict(names) for s in self.state.segments],
+                "markers": list(self.markers),
                 "speaker_names": _stringify(names),
                 "speaker_suggestion": self.state.speaker_suggestion,
                 "cards": list(self.cards),

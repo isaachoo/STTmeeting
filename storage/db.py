@@ -86,6 +86,15 @@ CREATE TABLE IF NOT EXISTS review_chat (
     cost_usd   REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS review_chat_meeting ON review_chat(meeting_id, id);
+
+-- Meeting backgrounds typed in advance and kept by name, so a recurring
+-- meeting's brief is picked from a list instead of retyped at the door.
+CREATE TABLE IF NOT EXISTS briefs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    brief_json TEXT NOT NULL DEFAULT '{}',
+    updated_at REAL NOT NULL
+);
 """
 
 # Columns added after the first release. Applied on every init so an existing
@@ -100,6 +109,9 @@ MIGRATIONS = {
         # many segments went into it, so it can be rebuilt if that ever changes.
         "digest_json": "ALTER TABLE meetings ADD COLUMN digest_json TEXT NOT NULL DEFAULT '{}'",
         "digest_upto": "ALTER TABLE meetings ADD COLUMN digest_upto INTEGER NOT NULL DEFAULT 0",
+        # How far the rolling summary reaches, so an interrupted meeting can be
+        # resumed with the copilot's memory intact instead of re-reading hours.
+        "summarised_upto": "ALTER TABLE meetings ADD COLUMN summarised_upto INTEGER NOT NULL DEFAULT 0",
     },
     # A name attached to one line, overriding whatever the diarisation said.
     # Needed because engines split one person across two voices, or merge two
@@ -179,8 +191,15 @@ def save_user_notes(meeting_id: int, text: str) -> None:
     _set(meeting_id, "user_notes", text)
 
 
-def save_summary(meeting_id: int, summary: str) -> None:
-    _set(meeting_id, "summary", summary)
+def save_summary(meeting_id: int, summary: str, upto: int | None = None) -> None:
+    if upto is None:
+        _set(meeting_id, "summary", summary)
+        return
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE meetings SET summary = ?, summarised_upto = ? WHERE id = ?",
+            (summary, int(upto), meeting_id),
+        )
 
 
 def set_segment_speaker(meeting_id: int, index: int, name: str) -> None:
@@ -221,7 +240,7 @@ def list_meetings(limit: int = 50) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             "SELECT m.id, m.title, m.started_at, m.ended_at, m.audio_seconds,"
-            " m.usage_json, m.brief_json,"
+            " m.usage_json, m.brief_json, m.language, m.provider,"
             " (SELECT COUNT(*) FROM segments s WHERE s.meeting_id = m.id) AS segments"
             " FROM meetings m ORDER BY m.id DESC LIMIT ?",
             (limit,),
@@ -234,6 +253,29 @@ def list_meetings(limit: int = 50) -> list[dict]:
         meeting["brief_json"] = _json(meeting.get("brief_json"))
         meetings.append(meeting)
     return meetings
+
+
+def unfinished_meetings() -> list[dict]:
+    """Meetings that were started and never stopped -- the process died, the
+    laptop slept, the browser was closed. Candidates for resuming."""
+    return [m for m in list_meetings(limit=200) if m.get("ended_at") is None]
+
+
+def close_interrupted(meeting_id: int) -> bool:
+    """Mark an interrupted meeting finished without resuming it. The end time is
+    the last thing said, not now -- the meeting did not run until today."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT started_at, ended_at FROM meetings WHERE id = ?", (meeting_id,)
+        ).fetchone()
+        if row is None or row["ended_at"] is not None:
+            return False
+        last = conn.execute(
+            "SELECT MAX(at) AS at FROM segments WHERE meeting_id = ?", (meeting_id,)
+        ).fetchone()["at"]
+        ended = row["started_at"] + float(last or 0)
+        conn.execute("UPDATE meetings SET ended_at = ? WHERE id = ?", (ended, meeting_id))
+        return True
 
 
 def get_meeting(meeting_id: int) -> dict | None:
@@ -444,6 +486,43 @@ def clear_chat(meeting_id: int) -> int:
         return conn.execute(
             "DELETE FROM review_chat WHERE meeting_id = ?", (meeting_id,)
         ).rowcount
+
+
+# ------------------------------------------------------------- saved briefs
+
+
+def list_briefs() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM briefs ORDER BY updated_at DESC").fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["brief"] = _json(item.pop("brief_json"))
+        out.append(item)
+    return out
+
+
+def save_brief(name: str, brief: dict) -> dict:
+    """Save under a name, replacing whatever that name held before."""
+    name = (name or "").strip()[:120]
+    if not name:
+        raise ValueError("a saved brief needs a name")
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO briefs (name, brief_json, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(name) DO UPDATE SET brief_json = excluded.brief_json,"
+            " updated_at = excluded.updated_at",
+            (name, json.dumps(brief or {}, ensure_ascii=False), time.time()),
+        )
+        row = conn.execute("SELECT * FROM briefs WHERE name = ?", (name,)).fetchone()
+    item = dict(row)
+    item["brief"] = _json(item.pop("brief_json"))
+    return item
+
+
+def delete_brief(brief_id: int) -> bool:
+    with _connect() as conn:
+        return conn.execute("DELETE FROM briefs WHERE id = ?", (brief_id,)).rowcount > 0
 
 
 def _json_list(raw) -> list:

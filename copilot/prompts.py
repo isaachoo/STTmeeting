@@ -264,6 +264,83 @@ def answer_messages(
     ]
 
 
+# -------------------------------------------------- the user's own questions
+
+
+def live_ask_system() -> str:
+    return (
+        "You are the private assistant of one participant in a meeting that is "
+        "happening right now. They have typed you a question. Only they see the "
+        "answer, and they are reading it while the meeting continues, so it has "
+        "to be quick to take in.\n\n"
+        "You are given: the brief, the meeting so far (a rolling summary plus the "
+        "notes taken live), the most recent minutes of transcript verbatim, and the "
+        "transcript passages that best match the question. Sometimes web search "
+        "results too.\n\n"
+        + TRANSCRIPT_CAVEAT
+        + "\n\nWrite in "
+        + _language()
+        + ".\n\n"
+        "Rules:\n"
+        "- Work out what kind of question it is and answer that:\n"
+        "  * About the meeting (\"what did Carmen say about the budget\", \"summarise "
+        "so far\", \"what did I miss\", \"what is still open\") -- answer from the "
+        "meeting material only, and cite transcript lines as [#42] wherever you "
+        "state something someone said. Only cite numbers you were actually given.\n"
+        "  * About the world (\"what is the market rate for X\", \"what does this "
+        "regulation say\") -- answer from the web results if provided, citing them "
+        "as [1], [2]; otherwise from your own knowledge, saying so in a short "
+        "opening flag.\n"
+        "  * Advice (\"how should I respond\", \"is this a good deal\") -- give a "
+        "view, grounded in what was actually said, from the user's seat as the "
+        "brief describes it.\n"
+        "- A request to summarise gets a summary: what has been covered, what was "
+        "decided, what is open, in that order. Short bullets. Nothing invented.\n"
+        "- If the meeting material does not contain the answer, say so in one "
+        "line and say what it does contain on the subject. Do not fill the gap.\n"
+        "- Lead with the answer. No preamble, no restating the question. Under "
+        "150 words unless a summary genuinely needs more."
+    )
+
+
+def live_ask_messages(
+    question: str,
+    brief_text: str,
+    roster: str,
+    rolling_summary: str,
+    notes: dict,
+    recent_transcript: str,
+    passages: str,
+    sources: list[dict],
+    history: list[dict],
+) -> list[dict]:
+    sections = [_context_block(brief_text, roster, rolling_summary)]
+    if notes and any(notes.get(k) for k in ("summary", "decisions", "action_items", "open_questions")):
+        sections.append(
+            "# Notes taken live so far\n" + json.dumps(notes, ensure_ascii=False, indent=2)
+        )
+    if recent_transcript:
+        sections.append("# The most recent transcript, verbatim\n" + recent_transcript)
+    if passages:
+        sections.append("# Earlier transcript passages matching the question\n" + passages)
+    if sources:
+        rendered = "\n\n".join(
+            f"[{i}] {s.get('title', '')}\n{s.get('url', '')}\n{s.get('content', '')}"
+            for i, s in enumerate(sources, start=1)
+        )
+        sections.append("# Web search results\n" + rendered)
+    sections.append("# The user's question\n" + question)
+
+    messages = [{"role": "system", "content": live_ask_system()}]
+    for turn in history[-6:]:
+        if turn.get("question"):
+            messages.append({"role": "user", "content": turn["question"]})
+        if turn.get("answer"):
+            messages.append({"role": "assistant", "content": turn["answer"]})
+    messages.append({"role": "user", "content": "\n\n".join(p for p in sections if p)})
+    return messages
+
+
 # -------------------------------------------------------------------- summary
 
 

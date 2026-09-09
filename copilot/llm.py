@@ -46,6 +46,19 @@ class Usage:
             except (TypeError, ValueError):
                 pass
 
+    def seed(self, snapshot: dict | None) -> None:
+        """Start from a previous total -- a resumed meeting's earlier spend."""
+        if not snapshot:
+            return
+        with self._lock:
+            self.calls += int(snapshot.get("calls") or 0)
+            self.prompt_tokens += int(snapshot.get("prompt_tokens") or 0)
+            self.completion_tokens += int(snapshot.get("completion_tokens") or 0)
+            try:
+                self.cost_usd += float(snapshot.get("cost_usd") or 0.0)
+            except (TypeError, ValueError):
+                pass
+
     def snapshot(self) -> dict:
         with self._lock:
             return {

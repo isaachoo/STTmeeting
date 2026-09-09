@@ -61,14 +61,16 @@ class CopilotEngine:
         if self.state.should_guess_speakers():
             self._submit("speakers", self._run_speaker_guess)
 
-    def ask(self, question: str) -> None:
-        """A question typed by the user: always answered, never deduplicated."""
+    def ask(self, question: str, web: bool = False) -> None:
+        """A question typed by the user: always answered, never deduplicated.
+
+        `web` is the user's choice, not a guess: most questions asked mid-meeting
+        are about the meeting ("what did she just say", "summarise so far") and
+        a web search for those is noise and cost.
+        """
         if self._closed or not question.strip():
             return
-        self._pool.submit(
-            self._guarded, self._run_answer, question.strip(), True, question.strip(),
-            "user", None,
-        )
+        self._pool.submit(self._guarded, self._run_user_question, question.strip(), web)
 
     def run_notes_now(self) -> None:
         """Take a note-taking pass on the calling thread and wait for it.
@@ -218,11 +220,76 @@ class CopilotEngine:
             },
         )
 
+    def _run_user_question(self, question: str, web: bool) -> None:
+        """Answer the user's own question, privately.
+
+        The whole meeting so far is in reach: the rolling summary and live notes
+        for shape, the recent transcript verbatim, and the passages anywhere in
+        the meeting that match the question (the same retrieval the review
+        workspace uses), so "what did Carmen say about the budget an hour ago"
+        works as well as "what did I just miss". Answers cite line numbers the
+        page can jump to.
+        """
+        from review import retrieval  # local import: review is the heavier package
+
+        sources: list[dict] = []
+        if web and search.available():
+            sources = search.search(question)
+
+        state = self.state
+        brief_text, roster, summary = self._context()
+        with state.lock:
+            notes = dict(state.notes)
+            history = list(state.qa_history)
+            names = dict(state.speaker_names)
+        recent = state.recent_text()
+        passages = retrieval.find(state.segments_as_dicts(), names, question)
+        # Lines already shown verbatim need not be repeated as passages.
+        covered = retrieval.indices_in(passages)
+
+        answer = self.llm.chat(
+            prompts.live_ask_messages(
+                question=question,
+                brief_text=brief_text,
+                roster=roster,
+                rolling_summary=summary,
+                notes=notes,
+                recent_transcript=recent,
+                passages="\n\n".join(p.text for p in passages),
+                sources=sources,
+                history=history,
+            ),
+            model=config.OPENROUTER_MODEL,
+            temperature=0.2,
+            max_tokens=700,
+        ).strip()
+        if not answer:
+            return
+
+        with state.lock:
+            valid = covered | {s.index for s in state.segments}
+        cited = retrieval.cited_indices(answer, valid=valid)
+        state.remember_qa(question, answer)
+        self.emit(
+            "answer",
+            {
+                "at": time.time(),
+                "question": question,
+                "answer": answer,
+                "cited": cited,
+                "from_user": True,
+                "searched": bool(sources),
+                "web_requested": web,
+                "web_enabled": search.available(),
+                "sources": [{"title": s["title"], "url": s["url"]} for s in sources],
+            },
+        )
+
     def _run_answer(
         self, question: str, needs_web: bool, query: str, target: str, turn: dict | None
     ) -> None:
-        """Answer a question. `target` is "attendee" (say it to the room) or
-        "user" (private, in the Copilot panel)."""
+        """Answer a question the room asked, as the attendee, looking a fact up
+        first when the think cycle said one was needed."""
         sources: list[dict] = []
         if needs_web and search.available():
             sources = search.search(query)
@@ -237,33 +304,17 @@ class CopilotEngine:
             temperature=0.2,
             max_tokens=450,
         ).strip()
-
         if not answer:
             return
 
-        if target == "attendee":
-            turn = turn or {}
-            self._emit_attendee_turn(
-                answer,
-                turn.get("kind", "answer"),
-                turn.get("urgency", "normal"),
-                turn.get("why", ""),
-                sources,
-                searched=bool(sources),
-            )
-            return
-
-        self.emit(
-            "answer",
-            {
-                "at": time.time(),
-                "question": question,
-                "answer": answer,
-                "from_user": True,
-                "searched": bool(sources),
-                "web_enabled": search.available(),
-                "sources": [{"title": s["title"], "url": s["url"]} for s in sources],
-            },
+        turn = turn or {}
+        self._emit_attendee_turn(
+            answer,
+            turn.get("kind", "answer"),
+            turn.get("urgency", "normal"),
+            turn.get("why", ""),
+            sources,
+            searched=bool(sources),
         )
 
     def _run_notes(self) -> None:
@@ -325,7 +376,7 @@ class CopilotEngine:
         with state.lock:
             state.rolling_summary = merged
             state.summarised_upto = cut
-        self.emit("summary", {"summary": merged})
+        self.emit("summary", {"summary": merged, "upto": cut})
 
     def _run_speaker_guess(self) -> None:
         """Propose which diarised voice is which person. Never auto-applied:

@@ -90,6 +90,9 @@ class MeetingState:
     advice_history: list[str] = field(default_factory=list)
     attendee_history: list[str] = field(default_factory=list)
     answered_questions: list[str] = field(default_factory=list)
+    # The user's private questions and the answers, so a follow-up ("and who
+    # said that?") resolves against what was just answered.
+    qa_history: list[dict] = field(default_factory=list)
 
     last_think_at: float = 0.0
     thought_upto: int = 0
@@ -290,6 +293,77 @@ class MeetingState:
         with self.lock:
             self.answered_questions.append(_normalise(question))
             del self.answered_questions[:-40]
+
+    def remember_qa(self, question: str, answer: str) -> None:
+        with self.lock:
+            self.qa_history.append({"question": question, "answer": answer})
+            del self.qa_history[:-12]
+
+    def segments_as_dicts(self) -> list[dict]:
+        """The transcript in the shape the review retrieval works on, so a
+        question asked mid-meeting can search everything said so far."""
+        with self.lock:
+            return [
+                {
+                    "idx": s.index,
+                    "at": s.at,
+                    "speaker": s.speaker,
+                    "speaker_name": s.speaker_name,
+                    "text": s.text,
+                }
+                for s in self.segments
+            ]
+
+    # -------------------------------------------------------------- resuming
+
+    def load_stored(self, meeting: dict) -> None:
+        """Rebuild the in-memory state from a stored meeting, to continue it.
+
+        Everything the copilot had -- transcript, names, notes, the rolling
+        summary and how far it reached -- comes back, so the meeting picks up
+        where it stopped rather than starting the copilot from a blank page.
+        Nothing before the interruption is advised on again.
+        """
+        with self.lock:
+            self.segments = [
+                Segment(
+                    index=int(s["idx"]),
+                    text=s["text"],
+                    speaker=s.get("speaker"),
+                    at=float(s.get("at") or 0),
+                    speaker_name=(s.get("speaker_name") or ""),
+                )
+                for s in meeting.get("segments") or []
+            ]
+            self.speaker_names = dict(meeting.get("speaker_names") or {})
+            stored_notes = meeting.get("notes_json") or {}
+            self.notes = {**EMPTY_NOTES, **stored_notes} if stored_notes else dict(EMPTY_NOTES)
+            self.user_notes = meeting.get("user_notes") or ""
+            self.rolling_summary = meeting.get("summary") or ""
+            count = len(self.segments)
+            upto = int(meeting.get("summarised_upto") or 0)
+            if self.rolling_summary and upto <= 0:
+                # An older row without the marker: assume the summary covers
+                # everything but a recent tail, which stays verbatim.
+                kept = 0
+                upto = count
+                for seg in reversed(self.segments):
+                    if kept >= config.RECENT_WINDOW_CHARS:
+                        break
+                    kept += len(seg.text)
+                    upto -= 1
+            self.summarised_upto = max(0, min(upto, count))
+            self.noted_upto = count
+            self.thought_upto = count
+            # Questions and answers from before the interruption.
+            for event in meeting.get("events") or []:
+                if event.get("kind") == "answer":
+                    payload = event.get("payload") or {}
+                    if payload.get("from_user") and payload.get("answer"):
+                        self.qa_history.append(
+                            {"question": payload.get("question", ""), "answer": payload["answer"]}
+                        )
+            del self.qa_history[:-12]
 
     # ------------------------------------------------------------------ misc
 

@@ -26,6 +26,50 @@ Cost, exports, API keys and history live in the **Session** drawer in the title
 bar. When the meeting stops, the **review workspace** takes over: search the
 transcript, ask it questions, curate the action items, and generate the minutes.
 
+## Asking the copilot mid-meeting
+
+**Ask AI** in the title bar (or **Ctrl+K**) opens a conversation with the
+copilot that only you see. Type anything: *「總結一下到目前為止」*, *"what did
+Carmen say about the budget"*, *"what did I miss in the last ten minutes"*, or a
+question about the world. Five one-tap prompts cover the common ones —
+summarise so far, what did I miss, open questions, what should I say next,
+action items so far.
+
+The answer sees the **whole meeting**: the rolling summary and live notes for
+shape, the last few minutes verbatim, and the passages anywhere in the meeting
+that match the question — the same retrieval the review workspace uses, so an
+hour-old remark is as findable as the last one. Answers cite transcript lines as
+`#42`; click one and the transcript jumps there. Follow-ups see the previous
+exchange.
+
+Tick **web** to also search the internet. It is off by default because most
+questions asked during a meeting are about the meeting, and a web search for
+those is noise and cost.
+
+## If the app dies mid-meeting
+
+Nothing is lost. Every transcript line is written to the database as it arrives,
+the notes and rolling summary are saved each time they update, and your own
+notes save as you type. When the app comes back it shows a banner — *"Q3 planning
+was never stopped. Everything said is saved."* — with two choices:
+
+- **Resume it** — the same meeting carries on: the transcript, speaker names,
+  notes and the copilot's memory are restored, new lines continue the numbering,
+  and a `▶ continued after an interruption` seam marks the gap. The clock and the
+  cost carry on from where they were.
+- **Just close it** — mark it finished and work on it in the review workspace.
+
+The same two actions sit next to the meeting under **Session ▸ Past meetings**.
+
+## Meeting backgrounds you can save
+
+Preparing the brief is the single biggest lever on how useful the advice is, so
+it no longer has to be typed at the door. Whatever you type into the pre-meeting
+form is kept across reloads, and **Save as…** stores it under a name —
+*"Monthly ops"*, *"Board meeting"* — to **Load** before any future meeting. The
+same list offers the brief of every past meeting, so a recurring meeting is one
+click.
+
 ## How it works
 
 ```
@@ -302,7 +346,7 @@ the worst thing this feature could do.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-318 tests, no network and no API keys needed.
+359 tests, no network and no API keys needed.
 
 `test_offline.py` covers the parts that fail silently in a live meeting: JSON
 coercion around model output, the rate limiting that decides when the copilot

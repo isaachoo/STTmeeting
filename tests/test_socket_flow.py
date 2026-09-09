@@ -140,6 +140,7 @@ class FakeLLM:
         self.prompts: list[str] = []
         self.think_reply = None   # set by a test to override
         self.speaker_reply = {"mapping": [], "note": ""}
+        self.text_reply = "A short answer."  # what chat() says; a test may change it
         self._lock = threading.Lock()
 
     def chat_json(self, messages, **_kwargs):
@@ -155,9 +156,11 @@ class FakeLLM:
 
     def chat(self, messages, **_kwargs):
         with self._lock:
-            self.prompts.append(messages[1]["content"])
+            # The user's own question carries earlier turns before the final
+            # prompt, so record the last user message rather than the second.
+            self.prompts.append(messages[-1]["content"])
         self.usage.add({"prompt_tokens": 500, "completion_tokens": 90, "cost": 0.0002})
-        return "A short answer."
+        return self.text_reply
 
     def saw(self, needle: str) -> bool:
         with self._lock:
@@ -510,6 +513,76 @@ class TestAttendeeOverTheWire(LiveServerCase):
         answers = self.browser.wait("answer")
         self.assertTrue(answers[0]["from_user"])
         self.assertEqual(self.browser.got("attendee"), [], "private answers stay private")
+
+
+class TestResumeAfterACrash(LiveServerCase):
+    """The process dies mid-meeting; the next start carries the meeting on."""
+
+    def _crash(self):
+        """Tear the live session down the way a dead process would leave it:
+        the row in the database never gets an ended_at."""
+        session = self.app_module._session
+        session.stopped = True
+        session.stt.stop()
+        session.engine.close(wait=False)
+        self.app_module._session = None
+        return session.meeting_id
+
+    def test_the_interrupted_meeting_is_offered_and_continued(self):
+        ws = self.start_meeting()
+        ws.push_utterance("第一句 before the crash", speaker=0)
+        self.browser.wait("segment")
+        meeting_id = self._crash()
+
+        # The list flags it, and a fresh page would show the banner.
+        status, body, _ = self.get("/api/meetings")
+        row = next(m for m in json.loads(body) if m["id"] == meeting_id)
+        self.assertTrue(row["interrupted"])
+
+        # Resume: same id, the old line is back on screen, marked as continued.
+        self.browser.clear()
+        self.browser.emit("start_meeting", {"sample_rate": 16000, "resume_meeting_id": meeting_id})
+        started = self.browser.wait("meeting_started")[-1]
+        self.assertEqual(started["meeting_id"], meeting_id)
+        self.assertTrue(started["resumed"])
+        self.assertEqual([s["text"] for s in started["segments"]], ["第一句 before the crash"])
+        seam = self.browser.wait("paused")[-1]
+        self.assertTrue(seam.get("resumed"))
+
+        # New speech continues the numbering in the same meeting.
+        self.assertTrue(wait_for(lambda: FakeWebSocketApp.latest is not None and FakeWebSocketApp.latest is not ws))
+        FakeWebSocketApp.latest.opened.wait(5)
+        FakeWebSocketApp.latest.push_utterance("第二句 after", speaker=1)
+        seg = self.browser.wait("segment")[-1]
+        self.assertEqual(seg["index"], 1)
+        stored = self.db.get_meeting(meeting_id)["segments"]
+        self.assertEqual([s["idx"] for s in stored], [0, 1])
+
+        # While it runs it is no longer "interrupted".
+        _, body, _ = self.get("/api/meetings")
+        row = next(m for m in json.loads(body) if m["id"] == meeting_id)
+        self.assertFalse(row["interrupted"])
+        self.assertTrue(row["running"])
+
+    def test_a_finished_meeting_cannot_be_resumed(self):
+        self.start_meeting()
+        self.browser.emit("stop_meeting")
+        stopped = self.browser.wait("meeting_stopped")[-1]
+        self.browser.clear()
+        self.browser.emit("start_meeting", {"sample_rate": 16000, "resume_meeting_id": stopped["meeting_id"]})
+        error = self.browser.wait("error")[-1]
+        self.assertIn("finished", error["message"])
+
+    def test_a_question_answer_cites_lines_over_the_wire(self):
+        ws = self.start_meeting()
+        ws.push_utterance("財務部最多加 50 萬", speaker=2)
+        self.browser.wait("segment")
+        self.llm.text_reply = "財務部只肯加 50 萬 [#0]，仲有 [#77]。"
+        self.browser.emit("ask", {"question": "budget 加幾多？"})
+        answer = self.browser.wait("answer")[-1]
+        self.assertTrue(answer["from_user"])
+        self.assertEqual(answer["cited"], [0], "an invented line is filtered out")
+        self.assertFalse(answer["web_requested"])
 
 
 class TestPauseAndSTTChoice(LiveServerCase):

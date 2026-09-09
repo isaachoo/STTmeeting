@@ -22,6 +22,7 @@
     <span id="elapsed" class="mono small">00:00</span>
     <span id="cost-total" class="mono small cost-pill" title="estimated cost so far">$0.0000</span>
     <button id="btn-session" class="ghost small">Session</button>
+    <button id="btn-ask" class="ghost" hidden title="Ask the copilot anything — about this meeting or the world (Ctrl+K)">Ask AI</button>
     <button id="btn-start" class="primary">Start meeting</button>
     <button id="btn-pause" hidden>Pause</button>
     <button id="btn-stop" class="danger" hidden>Stop</button>
@@ -94,11 +95,30 @@
   </div>
 </section>
 
+<!-- A meeting that was never stopped: the process died or the laptop slept.
+     Everything said is in the database; this offers to carry on. -->
+<div class="banner resume" id="resume-banner" hidden>
+  <span id="resume-text"></span>
+  <span class="resume-actions">
+    <button id="btn-resume" class="primary small">Resume it</button>
+    <button id="btn-finish-interrupted" class="ghost small" title="Close it as finished; review it later">Just close it</button>
+  </span>
+</div>
+
 <!-- Pre-meeting setup. The more that goes in here, the more specific the advice. -->
 <section id="setup" class="setup">
   <div class="setup-head">
     <h2>Before you start</h2>
     <span class="muted small">Everything here is optional, and every field makes the copilot sharper.</span>
+    <span class="brief-tools">
+      <select id="in-saved-brief" title="Meeting backgrounds you saved, and the briefs of past meetings">
+        <option value="">Saved backgrounds…</option>
+      </select>
+      <button id="btn-brief-load" class="ghost small" type="button">Load</button>
+      <button id="btn-brief-save" class="ghost small" type="button" title="Save everything below under a name, to load before a future meeting">Save as…</button>
+      <button id="btn-brief-delete" class="ghost small" type="button" hidden>Delete</button>
+      <span class="muted small" id="brief-hint"></span>
+    </span>
   </div>
 
   <div class="setup-grid">
@@ -218,6 +238,7 @@
     <form id="ask-form" class="ask">
       <input id="in-ask" type="text" placeholder="Ask the copilot privately, mid-meeting…" autocomplete="off">
       <button type="submit">Ask</button>
+      <button type="button" id="btn-ask-expand" class="ghost" title="Open the conversation view (Ctrl+K)">⤢</button>
     </form>
   </section>
 
@@ -261,6 +282,35 @@
   </section>
 
 </main>
+
+<!-- Ask the copilot: a conversation with the meeting, private to you. Same
+     answers land in the Copilot panel; this is the roomier place to work. -->
+<dialog id="ask-dialog" class="ask-dialog">
+  <div class="ask-dialog-head">
+    <div>
+      <strong>Ask the copilot</strong>
+      <span class="muted small">— about this meeting, or anything else. Only you see this.</span>
+    </div>
+    <button id="btn-ask-close" class="ghost small" type="button" title="Close (Esc)">✕</button>
+  </div>
+  <div class="ask-quick" id="ask-quick">
+    <button type="button" class="ghost small" data-q="總結一下到目前為止講過乜、決定咗乜、仲有乜未解決。">Summarise so far</button>
+    <button type="button" class="ghost small" data-q="我剛才走開咗，最近十分鐘講過乜？">What did I miss?</button>
+    <button type="button" class="ghost small" data-q="到目前為止有乜問題提出咗但未有答案？">Open questions</button>
+    <button type="button" class="ghost small" data-q="以我嘅角色，我而家最應該問乜或者講乜？">What should I say next?</button>
+    <button type="button" class="ghost small" data-q="到目前為止有乜 action item？邊個負責？">Action items so far</button>
+  </div>
+  <div class="ask-thread" id="ask-thread">
+    <p class="empty">Nothing asked yet. Answers cite transcript lines as <code>#12</code> — click one to jump to it.</p>
+  </div>
+  <form id="ask-dialog-form" class="ask-dialog-form">
+    <input id="ask-dialog-input" type="text" placeholder="Type a question…" autocomplete="off">
+    <label class="toggle small" title="Also search the web. Off by default: most questions are about the meeting, and a search for those is noise and cost.">
+      <input type="checkbox" id="ask-web"> web
+    </label>
+    <button type="submit" class="primary">Ask</button>
+  </form>
+</dialog>
 
 <!-- Popover for naming a voice. Moved next to whichever chip was clicked. -->
 <div id="name-popover" class="popover" hidden>
