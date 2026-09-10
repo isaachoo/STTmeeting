@@ -117,6 +117,7 @@ const ui = {
   btnBriefLoad: el('btn-brief-load'),
   btnBriefSave: el('btn-brief-save'),
   btnBriefDelete: el('btn-brief-delete'),
+  briefOpenRecording: el('brief-open-recording'),
   briefHint: el('brief-hint'),
 
   setup: el('setup'),
@@ -793,7 +794,7 @@ async function loadBriefOptions() {
     ui.savedBrief.append(group);
   }
   if ([...ui.savedBrief.options].some((o) => o.value === current)) ui.savedBrief.value = current;
-  ui.btnBriefDelete.hidden = !ui.savedBrief.value.startsWith('saved:');
+  syncBriefTools();
 }
 
 function selectedBrief() {
@@ -809,9 +810,20 @@ function selectedBrief() {
   return null;
 }
 
-ui.savedBrief.addEventListener('change', () => {
-  ui.btnBriefDelete.hidden = !ui.savedBrief.value.startsWith('saved:');
-});
+/* Picking a past meeting offers its recording too, because "Load" only fills
+ * the form with that meeting's background -- an easy thing to mistake for
+ * opening the meeting itself. */
+function syncBriefTools() {
+  const value = ui.savedBrief.value;
+  ui.btnBriefDelete.hidden = !value.startsWith('saved:');
+  if (value.startsWith('meeting:')) {
+    ui.briefOpenRecording.href = `/review/${value.slice(8)}`;
+    ui.briefOpenRecording.hidden = false;
+  } else {
+    ui.briefOpenRecording.hidden = true;
+  }
+}
+ui.savedBrief.addEventListener('change', syncBriefTools);
 
 ui.btnBriefLoad.addEventListener('click', () => {
   const chosen = selectedBrief();
@@ -821,8 +833,10 @@ ui.btnBriefLoad.addEventListener('click', () => {
   }
   fillBrief(chosen.brief);
   saveBriefDraft();
-  ui.briefHint.textContent = `loaded “${chosen.name || 'brief'}”`;
-  setTimeout(() => { ui.briefHint.textContent = ''; }, 2500);
+  ui.briefHint.textContent = ui.savedBrief.value.startsWith('meeting:')
+    ? `filled the form with the background of “${chosen.name || 'that meeting'}” — its recording is under Open recording →`
+    : `loaded “${chosen.name || 'brief'}”`;
+  setTimeout(() => { ui.briefHint.textContent = ''; }, 6000);
 });
 
 ui.btnBriefSave.addEventListener('click', async () => {

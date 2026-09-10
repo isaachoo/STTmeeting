@@ -153,6 +153,7 @@ def index():
     return render_template(
         "index.html",
         missing_keys=config.missing_keys(),
+        storage_warning=db.storage_warning(),
         providers=config.STT_PROVIDER_CHOICES,
         default_provider=config.STT_PROVIDER,
         language=config.DEEPGRAM_LANGUAGE,
@@ -179,6 +180,7 @@ def health():
             "notes_model": config.OPENROUTER_NOTES_MODEL,
             "web_search": bool(config.TAVILY_API_KEY),
             "meeting_running": bool(_session and not _session.stopped),
+            "storage": db.summary(),
         }
     )
 
@@ -698,6 +700,14 @@ def _start_review_job(meeting_id: int, kind: str, label: str, work):
         return jsonify({"error": "not found"}), 404
     if not config.OPENROUTER_API_KEY:
         return jsonify({"error": "OPENROUTER_API_KEY is not set"}), 400
+    if not any((s.get("text") or "").strip() for s in meeting.get("segments") or []):
+        # Say it up front, before a job spinner: there is nothing to work from.
+        return jsonify({
+            "error": "This meeting has no transcript lines saved, so there is nothing to "
+            "write from. If lines were on screen during the meeting, they were not "
+            "reaching the database -- check the console window for errors and whether "
+            "the data folder is inside OneDrive."
+        }), 409
     try:
         job = review_jobs.start(meeting_id, kind, label, lambda job: work(meeting, job))
     except RuntimeError as exc:
@@ -903,6 +913,13 @@ def main() -> None:
             "load but will not be able to start a meeting.",
             ", ".join(missing),
         )
+    stored = db.summary()
+    log.info(
+        "database %s: %d meeting(s), %d transcript line(s), %d unfinished",
+        stored["path"], stored["meetings"], stored["lines"], stored["unfinished"],
+    )
+    if stored["warning"]:
+        log.warning(stored["warning"])
     log.info("open http://%s:%s", config.HOST, config.PORT)
     app.run(
         host=config.HOST,

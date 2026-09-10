@@ -260,7 +260,19 @@ class MeetingSession:
 
     def _on_utterance(self, utt) -> None:
         seg = self.state.add_utterance(utt.text, utt.speaker)
-        db.add_segment(self.meeting_id, seg.index, seg.at, seg.speaker, seg.text)
+        try:
+            db.add_segment(self.meeting_id, seg.index, seg.at, seg.speaker, seg.text)
+        except Exception as exc:  # noqa: BLE001 - the meeting must go on, loudly
+            # A line that reaches the screen but not the database is exactly the
+            # failure that only shows up days later as an empty recording. Say
+            # so now, in the log and on the page, instead of carrying on quietly.
+            log.exception("could not save line %s to the database", seg.index)
+            self._save_failures = getattr(self, "_save_failures", 0) + 1
+            if self._save_failures <= 3:
+                self._emit("error", {
+                    "message": f"Could not save a transcript line to the database ({exc}). "
+                    "Check the console window; if the data folder is in OneDrive, move it out."
+                })
         self.interim = ""
         with self.state.lock:
             names = dict(self.state.speaker_names)

@@ -35,6 +35,7 @@ def generate(
     """Write one report and save it. Returns the stored row."""
     if kind not in KINDS:
         raise ValueError(f"unknown report kind: {kind}")
+    _require_transcript(meeting)
 
     client = client or OpenRouterClient()
     if on_progress:
@@ -91,6 +92,7 @@ def draft_actions(
     gets sent to colleagues, and an owner or a date the model inferred rather
     than heard is exactly the kind of mistake nobody catches until it matters.
     """
+    _require_transcript(meeting)
     client = client or OpenRouterClient()
 
     def digest_progress(done: int, total: int) -> None:
@@ -138,6 +140,22 @@ def draft_actions(
         "digest_built": built,
         "cost_usd": client.usage.snapshot().get("cost_usd", 0.0),
     }
+
+
+def _require_transcript(meeting: dict) -> None:
+    """Refuse to write a document about a meeting with no transcript.
+
+    Without this the model dutifully produces minutes of nothing, which reads as
+    "the minutes came out empty" when the real news is "no lines were saved".
+    """
+    lines = [s for s in meeting.get("segments") or [] if (s.get("text") or "").strip()]
+    if not lines:
+        raise ValueError(
+            "This meeting has no transcript lines, so there is nothing to write from. "
+            "If it did have a transcript on screen, the lines were not saved -- check "
+            "the console window for database errors and whether the data folder is in "
+            "a OneDrive/Dropbox folder."
+        )
 
 
 def filename_for(report: dict, meeting: dict) -> str:

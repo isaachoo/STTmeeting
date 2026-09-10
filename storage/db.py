@@ -6,10 +6,13 @@ the several threads that touch it, and at meeting speed the cost is irrelevant.
 """
 
 import json
+import logging
 import sqlite3
 import time
 
 import config
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meetings (
@@ -234,6 +237,59 @@ def finish_meeting(
                 meeting_id,
             ),
         )
+    checkpoint()
+
+
+def checkpoint() -> None:
+    """Fold the write-ahead log into the main database file.
+
+    In WAL mode recent writes live in `meetings.sqlite3-wal` until SQLite gets
+    round to a checkpoint. That is fine on a plain disk, but a folder watched by
+    OneDrive, Dropbox or Google Drive can upload, lock or replace that side file
+    under us, and a meeting's lines vanish with it. Checkpointing at the end of
+    every meeting puts the whole record in the one file the user can see.
+    """
+    try:
+        with _connect() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error as exc:  # not worth failing the meeting over
+        log.warning("could not checkpoint the database: %s", exc)
+
+
+_SYNC_FOLDERS = ("onedrive", "dropbox", "google drive", "googledrive", "icloud", "box sync")
+
+
+def storage_warning() -> str:
+    """A plain-language warning when the data folder lives in a cloud-sync
+    folder, or '' when it does not. Sync clients and SQLite do not mix."""
+    lowered = str(config.DATA_DIR).lower()
+    for marker in _SYNC_FOLDERS:
+        if marker in lowered:
+            return (
+                f"The data folder is inside a {marker.title()} folder ({config.DATA_DIR}). "
+                "Cloud sync tools can lock or replace the database while a meeting is "
+                "being written, and lines go missing. Move the project out of the synced "
+                "folder (for example to C:\\Users\\<you>\\STTmeeting) or pause syncing "
+                "while the app runs."
+            )
+    return ""
+
+
+def summary() -> dict:
+    """What is on disk, for the startup log and the health check."""
+    with _connect() as conn:
+        meetings = conn.execute("SELECT COUNT(*) AS n FROM meetings").fetchone()["n"]
+        lines = conn.execute("SELECT COUNT(*) AS n FROM segments").fetchone()["n"]
+        unfinished = conn.execute(
+            "SELECT COUNT(*) AS n FROM meetings WHERE ended_at IS NULL"
+        ).fetchone()["n"]
+    return {
+        "path": str(config.DB_PATH),
+        "meetings": int(meetings),
+        "lines": int(lines),
+        "unfinished": int(unfinished),
+        "warning": storage_warning(),
+    }
 
 
 def list_meetings(limit: int = 50) -> list[dict]:

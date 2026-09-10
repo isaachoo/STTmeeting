@@ -644,3 +644,13 @@ button.cite:hover { background: var(--accent); color: #10141a; }
 }
 .banner.finished[hidden] { display: none; }
 .primary-link.small { font-size: 12px; padding: 4px 10px; }
+
+.ghost-link {
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+.ghost-link:hover { color: var(--text); border-color: var(--accent); }
+.ghost-link[hidden] { display: none; }

@@ -412,6 +412,85 @@ class TestResumingASession(unittest.TestCase):
         self.assertEqual(session.language, "en")
 
 
+# ------------------------------------------------- nothing lost, nothing hollow
+
+
+class TestDurabilityAndEmptyMeetings(unittest.TestCase):
+    def test_finishing_a_meeting_checkpoints_the_wal(self):
+        """After Stop, the whole record is in meetings.sqlite3 itself, not in a
+        side file a sync client can lose."""
+        meeting = stored_meeting()
+        db.finish_meeting(meeting["id"], 10, {}, "nova-3")
+        wal = Path(str(config.DB_PATH) + "-wal")
+        self.assertTrue(not wal.exists() or wal.stat().st_size == 0, "WAL should be folded in")
+
+    def test_summary_counts_what_is_on_disk(self):
+        before = db.summary()
+        stored_meeting()
+        after = db.summary()
+        self.assertEqual(after["meetings"], before["meetings"] + 1)
+        self.assertEqual(after["lines"], before["lines"] + len(LINES))
+        self.assertIn("path", after)
+
+    def test_a_cloud_synced_data_folder_is_called_out(self):
+        original = config.DATA_DIR
+        self.addCleanup(setattr, config, "DATA_DIR", original)
+        config.DATA_DIR = Path("C:/Users/isaac/OneDrive - HKSA/Desktop/STTmeeting/data")
+        self.assertIn("Onedrive", db.storage_warning())
+        config.DATA_DIR = Path("C:/Users/isaac/STTmeeting/data")
+        self.assertEqual(db.storage_warning(), "")
+
+    def test_a_line_that_cannot_be_saved_is_reported_not_swallowed(self):
+        saved = {n: getattr(config, n) for n in ("DEEPGRAM_API_KEY", "THINK_MIN_INTERVAL",
+                                                  "NOTES_INTERVAL", "SPEAKER_GUESS_INTERVAL")}
+        self.addCleanup(lambda: [setattr(config, n, v) for n, v in saved.items()])
+        config.DEEPGRAM_API_KEY = "k"
+        config.THINK_MIN_INTERVAL = config.NOTES_INTERVAL = config.SPEAKER_GUESS_INTERVAL = 9999
+        import session as session_module
+
+        emitter = Emitter()
+        session = session_module.MeetingSession(brief=brief(), sample_rate=16000, emit=emitter)
+        self.addCleanup(session.engine.close, False)
+
+        original = session_module.db.add_segment
+
+        def broken(*a, **k):
+            raise RuntimeError("database is locked")
+
+        session_module.db.add_segment = broken
+        self.addCleanup(setattr, session_module.db, "add_segment", original)
+        session._on_utterance(Utterance(text="一句", speaker=0))
+
+        self.assertEqual(len(emitter.of("segment")), 1, "the line still reaches the screen")
+        errors = emitter.of("error")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Could not save", errors[0]["message"])
+
+    def test_a_report_for_an_empty_meeting_is_refused_with_a_reason(self):
+        from review import reports
+
+        db.init()
+        mid = db.create_meeting("Empty", {}, "zh-HK", "nova-3")
+        db.finish_meeting(mid, 0, {}, "nova-3")
+        with self.assertRaises(ValueError) as caught:
+            reports.generate(db.get_meeting(mid), "minutes", client=FakeLLM())
+        self.assertIn("no transcript lines", str(caught.exception))
+
+    def test_a_digest_that_reads_nothing_raises_the_real_reason(self):
+        from copilot.llm import LLMError
+        from review import digest as digest_module
+
+        meeting = stored_meeting()
+
+        class Refusing(FakeLLM):
+            def chat_json(self, messages, **_kw):
+                raise LLMError("OpenRouter returned 400: response_format not supported")
+
+        with self.assertRaises(LLMError) as caught:
+            digest_module.build(meeting, client=Refusing())
+        self.assertIn("response_format not supported", str(caught.exception))
+
+
 # ------------------------------------------------------------- saved briefs
 
 
@@ -491,6 +570,22 @@ class TestContinuityApi(unittest.TestCase):
         rows = {m["id"]: m for m in self._json(self.client.get("/api/meetings"))}
         self.assertFalse(rows[meeting["id"]]["interrupted"])
         self.assertTrue(rows[meeting["id"]]["running"])
+
+    def test_a_report_job_for_an_empty_meeting_says_so_up_front(self):
+        saved_key = config.OPENROUTER_API_KEY
+        config.OPENROUTER_API_KEY = "or-test"
+        self.addCleanup(setattr, config, "OPENROUTER_API_KEY", saved_key)
+        db.init()
+        mid = db.create_meeting("Empty", {}, "zh-HK", "nova-3")
+        db.finish_meeting(mid, 0, {}, "nova-3")
+        response = self.client.post(f"/api/meetings/{mid}/reports", json={"kind": "minutes"})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no transcript lines", self._json(response)["error"])
+
+    def test_health_reports_what_is_stored(self):
+        payload = self._json(self.client.get("/api/health"))
+        self.assertIn("meetings", payload["storage"])
+        self.assertIn("lines", payload["storage"])
 
     def test_closing_an_interrupted_meeting(self):
         meeting = stored_meeting()

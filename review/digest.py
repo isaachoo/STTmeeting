@@ -85,6 +85,7 @@ def build(
     voices = roster(meeting)
     total = len(chunks)
     done = [0]
+    reasons: list[str] = []
 
     def read(numbered: tuple[int, str]) -> dict:
         i, chunk = numbered
@@ -101,6 +102,7 @@ def build(
             # gap is recorded so the digest can say what it is missing rather
             # than quietly presenting itself as complete.
             log.warning("digest section %d failed: %s", i + 1, exc)
+            reasons.append(str(exc))
             result = {"_failed": position}
         done[0] += 1
         if on_progress:
@@ -110,7 +112,16 @@ def build(
     with ThreadPoolExecutor(max_workers=min(WORKERS, total)) as pool:
         parts = list(pool.map(read, enumerate(chunks)))
 
-    return merge(parts, total)
+    digest = merge(parts, total)
+    if len(digest["failed_sections"]) == total:
+        # Nothing was read at all. A report written from this would be a
+        # document about nothing, presented as the minutes; the real reason
+        # (usually the model or the key) is far more useful than that.
+        raise LLMError(
+            f"could not read any of the {total} section(s) of the transcript: "
+            + (reasons[0] if reasons else "unknown error")
+        )
+    return digest
 
 
 def merge(parts: list[dict], sections: int) -> dict:

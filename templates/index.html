@@ -95,6 +95,10 @@
   </div>
 </section>
 
+{% if storage_warning %}
+<div class="banner error">⚠ {{ storage_warning }}</div>
+{% endif %}
+
 <!-- Shown after a meeting has finished, so the screen's contents are clearly a
      record and not something the next meeting will pick up. -->
 <div class="banner finished" id="finished-banner" hidden>
@@ -124,7 +128,8 @@
       <select id="in-saved-brief" title="Meeting backgrounds you saved, and the briefs of past meetings">
         <option value="">Saved backgrounds…</option>
       </select>
-      <button id="btn-brief-load" class="ghost small" type="button">Load</button>
+      <button id="btn-brief-load" class="ghost small" type="button" title="Fill the form below with the chosen background. This does not open a recording — use Session ▸ Past meetings ▸ Review for that.">Load background</button>
+      <a id="brief-open-recording" class="ghost-link small" href="#" hidden title="Open the transcript, notes and reports of that meeting">Open recording →</a>
       <button id="btn-brief-save" class="ghost small" type="button" title="Save everything below under a name, to load before a future meeting">Save as…</button>
       <button id="btn-brief-delete" class="ghost small" type="button" hidden>Delete</button>
       <span class="muted small" id="brief-hint"></span>
