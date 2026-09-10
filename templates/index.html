@@ -95,6 +95,16 @@
   </div>
 </section>
 
+<!-- Shown after a meeting has finished, so the screen's contents are clearly a
+     record and not something the next meeting will pick up. -->
+<div class="banner finished" id="finished-banner" hidden>
+  <span id="finished-text"></span>
+  <span class="resume-actions">
+    <a id="finished-review" class="primary-link small" href="#">Review it →</a>
+    <button id="btn-new-meeting" class="ghost small" title="Clear the screen and the form, ready for a different meeting">New meeting</button>
+  </span>
+</div>
+
 <!-- A meeting that was never stopped: the process died or the laptop slept.
      Everything said is in the database; this offers to carry on. -->
 <div class="banner resume" id="resume-banner" hidden>

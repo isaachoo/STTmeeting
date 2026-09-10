@@ -104,6 +104,10 @@ const ui = {
   chatCost: el('chat-cost'),
   btnChatClear: el('btn-chat-clear'),
 
+  finishedBanner: el('finished-banner'),
+  finishedText: el('finished-text'),
+  finishedReview: el('finished-review'),
+  btnNewMeeting: el('btn-new-meeting'),
   resumeBanner: el('resume-banner'),
   resumeText: el('resume-text'),
   btnResume: el('btn-resume'),
@@ -1635,6 +1639,7 @@ function setRunning(isRunning) {
   ui.setup.hidden = isRunning;
   if (isRunning) {
     ui.resumeBanner.hidden = true;
+    ui.finishedBanner.hidden = true;
     ui.btnReview.hidden = true;
   }
   if (!isRunning) setPaused(false);
@@ -1656,10 +1661,71 @@ socket.on('__close', () => {
 
 socket.on('snapshot', (snap) => paintSnapshot(snap, false));
 
+/* Empty panels, the form as the user left it, and a banner naming the meeting
+ * that just finished with a way into the review workspace. */
+function paintIdle(snap) {
+  meetingId = snap.meeting_id;
+  setRunning(false);
+  clearPanels();
+  showFinished(snap.meeting_id, snap.title);
+  ui.statusText.textContent = 'idle — ready for a new meeting';
+}
+
+function clearPanels() {
+  speakerNames = {};
+  knownSpeakers = new Set();
+  speakerFilter.clear();
+  ui.filterBar.hidden = true;
+  renderSpeakerChips();
+  ui.transcript.innerHTML = '<p class="empty">Transcript appears here once the meeting starts.</p>';
+  ui.interim.textContent = '';
+  ui.advice.innerHTML = '<p class="empty">Key points, questions worth asking, and things to watch out for appear here.</p>';
+  ui.attendee.innerHTML = '<p class="empty">Nothing to say yet.</p>';
+  ui.notes.innerHTML = '<p class="empty">Decisions, action items and open questions are collected as you go.</p>';
+  ui.userNotes.value = '';
+  ui.summary.textContent = 'Builds up once the meeting has some length to it.';
+  ui.suggestion.hidden = true;
+  ui.notesUpdated.textContent = '';
+  renderCost({ total_usd: 0, stt_usd: 0, llm_usd: 0, audio_minutes: 0, llm_calls: 0,
+               prompt_tokens: 0, completion_tokens: 0 });
+  startedAtMs = null;
+  ui.elapsed.textContent = '00:00';
+}
+
+function showFinished(id, title) {
+  if (!id) return;
+  const name = title || `Meeting ${id}`;
+  ui.finishedText.textContent =
+    `“${name}” has finished and is saved. Starting a new meeting will not touch it.`;
+  ui.finishedReview.href = `/review/${id}`;
+  ui.finishedBanner.hidden = false;
+  showReviewLink(id);
+}
+
+ui.btnNewMeeting.addEventListener('click', () => {
+  // A clean slate: panels, the pre-meeting form, and the saved draft of it.
+  clearPanels();
+  fillBrief({});
+  try { localStorage.removeItem(DRAFT_KEY); } catch (err) { /* fine */ }
+  ui.savedBrief.value = '';
+  ui.btnBriefDelete.hidden = true;
+  ui.finishedBanner.hidden = true;
+  ui.btnReview.hidden = true;
+  ui.statusText.textContent = 'idle';
+  ui.inTitle.focus();
+});
+
 /* Paint the whole page from a server snapshot. Used on connect and reconnect,
  * and -- with `fresh` -- when a meeting starts, because a *resumed* meeting
  * starts with a transcript, cards and notes already in it. */
 function paintSnapshot(snap, fresh) {
+  if (snap && snap.meeting_id && !snap.running && !fresh) {
+    // The last meeting has finished. Its transcript and notes are a record,
+    // and they live in the review workspace -- painting them here made the
+    // console look like it was still in that meeting.
+    paintIdle(snap);
+    return;
+  }
   if (!snap || !snap.meeting_id) {
     setRunning(false);
     if (!ui.attendees.childElementCount) addAttendeeRow();
@@ -1715,9 +1781,11 @@ function paintSnapshot(snap, fresh) {
     ui.attendee.innerHTML = '<p class="empty">Nothing to say yet.</p>';
   }
 
-  if (snap.notes) renderNotes(snap.notes);
-  if (snap.user_notes) ui.userNotes.value = snap.user_notes;
-  if (snap.summary) ui.summary.textContent = snap.summary;
+  // Always set, never "only if present": a new meeting's empty values must
+  // clear the previous meeting's text, or old notes get typed into the new one.
+  renderNotes(snap.notes || {});
+  ui.userNotes.value = snap.user_notes || '';
+  ui.summary.textContent = snap.summary || 'Builds up once the meeting has some length to it.';
   if (snap.cost) {
     renderCost(snap.cost);
     startedAtMs = Date.now() - (snap.cost.elapsed_seconds || 0) * 1000;
@@ -1742,7 +1810,7 @@ function paintSnapshot(snap, fresh) {
     }
   } else {
     setRunning(false);
-    ui.statusText.textContent = 'last meeting finished';
+    ui.statusText.textContent = 'idle';
   }
 }
 
@@ -1766,7 +1834,7 @@ socket.on('meeting_stopped', (payload) => {
   ui.interim.textContent = '';
   if (payload.notes) renderNotes(payload.notes);
   log(`meeting ${payload.meeting_id} finished and saved`);
-  showReviewLink(payload.meeting_id);
+  showFinished(payload.meeting_id, ui.inTitle.value.trim());
   loadHistory();
   loadBriefOptions();
   checkInterrupted();
