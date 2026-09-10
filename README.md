@@ -202,6 +202,7 @@ knowing about:
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v3.2` | The advisor. Cheap and fast matters more than clever here |
 | `OPENROUTER_NOTES_MODEL` | same as above | Set a stronger model if you want better notes |
 | `REVIEW_MODEL` | same as above | The review workspace: reports, questions, reading the transcript. Worth a stronger model — minutes get read by other people |
+| `OPENROUTER_REASONING` | `0` | Let "thinking" models reason before answering. Off: slower, dearer, and on long inputs the reasoning can eat the whole output budget so the answer comes back empty |
 | `TAVILY_API_KEY` | unset | Without it the copilot answers from model knowledge and says so |
 | `THINK_MIN_INTERVAL` | `15` | Seconds between think cycles — the main cost dial |
 | `THINK_URGENT_INTERVAL` | `5` | Shorter floor when someone in the room just asked a question |

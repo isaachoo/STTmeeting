@@ -130,6 +130,10 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v3.2").strip
 OPENROUTER_NOTES_MODEL = (
     os.getenv("OPENROUTER_NOTES_MODEL", "").strip() or OPENROUTER_MODEL
 )
+# Hybrid "thinking" models reason privately before answering, charged against
+# the output budget. Off by default: this app wants fast, cheap answers, and a
+# long transcript section can otherwise come back empty (see copilot/llm.py).
+OPENROUTER_REASONING = _bool("OPENROUTER_REASONING", False)
 
 # --- Web search ---
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()

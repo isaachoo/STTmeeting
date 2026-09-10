@@ -94,7 +94,7 @@ def build(
             result = client.chat_json(
                 prompts.digest_messages(context, voices, chunk, position),
                 model=config.review_model(),
-                max_tokens=1600,
+                max_tokens=2500,
                 temperature=0.2,
             )
         except LLMError as exc:

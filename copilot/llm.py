@@ -20,7 +20,10 @@ TIMEOUT = (10, 90)  # connect, read
 
 
 class LLMError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, empty: bool = False, finish_reason: str = ""):
+        super().__init__(message)
+        self.empty = empty  # the model answered with nothing at all
+        self.finish_reason = finish_reason
 
 
 class Usage:
@@ -93,6 +96,13 @@ class OpenRouterClient:
             "max_tokens": max_tokens,
             # Ask OpenRouter to report what the call actually cost.
             "usage": {"include": True},
+            # "Thinking" models (DeepSeek V3.2 among them) reason in private
+            # before answering, and that reasoning is charged against
+            # max_tokens. On a long prompt it can use the whole budget and the
+            # visible answer comes back empty. Nothing in this app wants
+            # deliberation over speed and cost, so reasoning is off unless the
+            # user turns it on. OpenRouter ignores this for models without it.
+            "reasoning": {"enabled": config.OPENROUTER_REASONING},
         }
         if json_mode:
             body["response_format"] = {"type": "json_object"}
@@ -129,12 +139,51 @@ class OpenRouterClient:
         choices = payload.get("choices") or []
         if not choices:
             raise LLMError("OpenRouter returned no choices")
-        return (choices[0].get("message") or {}).get("content") or ""
+        choice = choices[0]
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        if not content.strip():
+            # Say what actually happened; "did not return JSON" hid this for a
+            # whole afternoon. The usual cause is the output budget being spent
+            # on reasoning, which the finish_reason and token counts reveal.
+            finish = choice.get("finish_reason") or choice.get("native_finish_reason") or "?"
+            details = payload.get("usage") or {}
+            reasoning_tokens = (details.get("completion_tokens_details") or {}).get(
+                "reasoning_tokens"
+            )
+            hint = ""
+            if finish == "length":
+                hint = (
+                    " -- the model ran out of output budget"
+                    + (f" after {reasoning_tokens} reasoning tokens" if reasoning_tokens else "")
+                    + "; raise max_tokens or use a model that does not reason first"
+                )
+            elif message.get("reasoning") or message.get("reasoning_content"):
+                hint = " -- it returned reasoning but no answer"
+            raise LLMError(
+                f"model {body['model']} returned an empty answer (finish_reason={finish}){hint}",
+                empty=True,
+                finish_reason=finish,
+            )
+        return content
 
     def chat_json(self, messages: list[dict], **kwargs) -> dict:
-        """Chat and parse a JSON object, tolerating fences and stray prose."""
+        """Chat and parse a JSON object, tolerating fences and stray prose.
+
+        An empty answer that ran out of budget is retried once with twice the
+        room -- long transcript sections on a verbose model need it -- before
+        giving up with the real reason.
+        """
         kwargs.setdefault("json_mode", True)
-        raw = self.chat(messages, **kwargs)
+        try:
+            raw = self.chat(messages, **kwargs)
+        except LLMError as exc:
+            if not (exc.empty and exc.finish_reason == "length"):
+                raise
+            kwargs["max_tokens"] = int(kwargs.get("max_tokens", 700)) * 2
+            log.warning("empty answer at the token limit; retrying with max_tokens=%s",
+                        kwargs["max_tokens"])
+            raw = self.chat(messages, **kwargs)
         parsed = extract_json(raw)
         if parsed is None:
             raise LLMError(f"model did not return JSON: {raw[:300]}")
