@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import threading
+import time
 
 import requests
 
@@ -16,7 +17,8 @@ import config
 
 log = logging.getLogger(__name__)
 
-TIMEOUT = (10, 90)  # connect, read
+TIMEOUT = (10, 90)  # connect, read -- the live meeting; a slow answer there is useless anyway
+REVIEW_TIMEOUT = (10, 300)  # after the meeting a long section may take minutes to write
 
 
 class LLMError(RuntimeError):
@@ -85,9 +87,16 @@ class OpenRouterClient:
         temperature: float = 0.3,
         max_tokens: int = 700,
         json_mode: bool = False,
+        timeout: tuple | None = None,
+        label: str = "",
     ) -> str:
+        """One completion. `label` names the call in the log ("digest 3/14"), so
+        a long job is visibly alive in the console instead of silent until it
+        fails; unlabelled calls (the live meeting's steady stream) log at DEBUG."""
         if not self.api_key:
             raise LLMError("OPENROUTER_API_KEY is not set")
+        started = time.monotonic()
+        prompt_chars = sum(len(m.get("content") or "") for m in messages)
 
         body = {
             "model": model or config.OPENROUTER_MODEL,
@@ -116,9 +125,11 @@ class OpenRouterClient:
                     "X-Title": "Cantonese Meeting Copilot",
                 },
                 json=body,
-                timeout=TIMEOUT,
+                timeout=timeout or TIMEOUT,
             )
         except requests.RequestException as exc:
+            log.warning("llm %s: request failed after %.1fs: %s",
+                        label or "call", time.monotonic() - started, exc)
             raise LLMError(f"OpenRouter request failed: {exc}") from exc
 
         if resp.status_code != 200:
@@ -142,6 +153,14 @@ class OpenRouterClient:
         choice = choices[0]
         message = choice.get("message") or {}
         content = message.get("content") or ""
+        usage = payload.get("usage") or {}
+        log.log(
+            logging.INFO if label else logging.DEBUG,
+            "llm %s: %s, %d chars in, %s tokens out, %.1fs, finish=%s",
+            label or "call", body["model"], prompt_chars,
+            usage.get("completion_tokens", "?"), time.monotonic() - started,
+            choice.get("finish_reason") or "?",
+        )
         if not content.strip():
             # Say what actually happened; "did not return JSON" hid this for a
             # whole afternoon. The usual cause is the output budget being spent

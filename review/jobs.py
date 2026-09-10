@@ -33,7 +33,7 @@ class Job:
         self.meeting_id = meeting_id
         self.kind = kind
         self.label = label
-        self.status = "running"  # running | done | error
+        self.status = "running"  # running | done | error | cancelled
         self.stage = ""
         self.done = 0
         self.total = 0
@@ -91,17 +91,45 @@ def start(meeting_id: int, kind: str, label: str, work) -> Job:
         _forget_old()
 
     def run() -> None:
+        started = time.time()
+        log.info("review job %s (%s) started for meeting %s", job.id, kind, meeting_id)
         try:
-            job.result = work(job)
+            result = work(job)
+            if job.status == "cancelled":
+                # The user gave up waiting; whatever came back is not wanted.
+                log.info("review job %s (%s) finished after being cancelled; result dropped",
+                         job.id, kind)
+                return
+            job.result = result
             job.status = "done"
+            log.info("review job %s (%s) done in %.0fs", job.id, kind, time.time() - started)
         except Exception as exc:  # the browser has to be told, whatever broke
+            if job.status == "cancelled":
+                return
             log.exception("review job %s (%s) failed", job.id, kind)
             job.error = str(exc) or exc.__class__.__name__
             job.status = "error"
         finally:
-            job.finished_at = time.time()
+            if job.finished_at is None:
+                job.finished_at = time.time()
 
     threading.Thread(target=run, name=f"review-{kind}-{meeting_id}", daemon=True).start()
+    return job
+
+
+def cancel(job_id: str) -> Job | None:
+    """Give up on a job. The model call already in flight cannot be interrupted,
+    but the meeting is freed for a new job at once and the late result is
+    thrown away when it arrives."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return None
+        if job.status == "running":
+            job.status = "cancelled"
+            job.finished_at = time.time()
+            job.error = "cancelled"
+    log.info("review job %s (%s) cancelled by the user", job.id, job.kind)
     return job
 
 

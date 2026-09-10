@@ -174,7 +174,7 @@ SUMMARY_TRIGGER_CHARS = _int("SUMMARY_TRIGGER_CHARS", 6000)
 # A five-hour meeting is far too long to put in one prompt, so the review side
 # works from a digest built once by reading the transcript in chunks, and from
 # retrieved passages for anything that needs the actual words.
-REVIEW_CHUNK_CHARS = _int("REVIEW_CHUNK_CHARS", 4500)
+REVIEW_CHUNK_CHARS = _int("REVIEW_CHUNK_CHARS", 9000)
 REVIEW_WINDOW_CHARS = _int("REVIEW_WINDOW_CHARS", 700)  # one retrievable passage
 REVIEW_PASSAGES = _int("REVIEW_PASSAGES", 8)  # passages sent with a question
 REVIEW_MODEL = (os.getenv("REVIEW_MODEL") or "").strip()  # falls back to OPENROUTER_MODEL

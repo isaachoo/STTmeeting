@@ -60,7 +60,8 @@ def ask(
         history=history or [],
     )
     answer = client.chat(
-        messages, model=config.review_model(), max_tokens=900, temperature=0.2
+        messages, model=config.review_model(), max_tokens=900, temperature=0.2,
+        label="ask the meeting",
     )
 
     cited = retrieval.cited_indices(answer, valid=covered)

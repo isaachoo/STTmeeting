@@ -17,6 +17,7 @@ const ui = {
   job: el('r-job'),
   jobText: el('r-job-text'),
   jobFill: el('r-job-fill'),
+  btnJobCancel: el('btn-job-cancel'),
   error: el('r-error'),
 
   transcript: el('r-transcript'),
@@ -867,9 +868,13 @@ async function startJob(path, body, onDone) {
   }
 }
 
+let currentJobId = null;
+
 function followJob(job, onDone) {
+  currentJobId = job.id;
   setJobBanner(job);
   const poll = async () => {
+    if (currentJobId !== job.id) return; // superseded or cancelled
     let current;
     try {
       current = (await api(`/api/jobs/${job.id}`)).job;
@@ -884,6 +889,8 @@ function followJob(job, onDone) {
       return;
     }
     ui.job.hidden = true;
+    currentJobId = null;
+    if (current.status === 'cancelled') return;
     if (current.status === 'error') {
       showError(`${current.label} failed: ${current.error}`);
       return;
@@ -893,11 +900,26 @@ function followJob(job, onDone) {
   setTimeout(poll, 800);
 }
 
+ui.btnJobCancel.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  const id = currentJobId;
+  currentJobId = null;
+  ui.job.hidden = true;
+  try {
+    await api(`/api/jobs/${id}/cancel`, { method: 'POST' });
+  } catch (err) {
+    showError(`could not cancel: ${err.message}`);
+  }
+});
+
 function setJobBanner(job) {
   ui.job.hidden = false;
   const stage = job.stage ? ` — ${job.stage}` : '';
   const count = job.total ? ` ${job.done}/${job.total}` : '';
-  ui.jobText.textContent = `${job.label}${stage}${count} · ${job.elapsed}s`;
+  const wait = job.total && job.done === 0 && job.elapsed > 20
+    ? ' (each section is one model call and can take a minute; the console shows each one land)'
+    : '';
+  ui.jobText.textContent = `${job.label}${stage}${count} · ${Math.round(job.elapsed)}s${wait}`;
   const percent = job.total ? Math.round((job.done / job.total) * 100) : 0;
   ui.jobFill.style.width = `${percent}%`;
 }

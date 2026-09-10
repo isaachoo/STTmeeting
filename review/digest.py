@@ -20,17 +20,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 import config
 from copilot import prompts
-from copilot.llm import LLMError, OpenRouterClient
+from copilot.llm import REVIEW_TIMEOUT, LLMError, OpenRouterClient
 from storage import db
 
 from . import retrieval
 
 log = logging.getLogger(__name__)
 
-# Chunks are read concurrently. Small on purpose: this shares a rate limit with
-# nothing else in a finished meeting, but a user with a slow model should not
-# have twenty requests in flight against their OpenRouter account at once.
-WORKERS = 4
+# Sections are read concurrently. A two-hour meeting is a dozen or more
+# sections and each is a full model call of half a minute or more, so this is
+# what decides whether the minutes take one minute or five. Six is a balance:
+# fast enough to feel alive, few enough not to trip OpenRouter's rate limits.
+WORKERS = 6
 
 _LIST_KEYS = ("topics", "decisions", "actions", "questions", "facts", "quotes")
 
@@ -80,6 +81,8 @@ def build(
     if not chunks:
         return empty()
 
+    log.info("digest: reading meeting %s in %d section(s), %d at a time",
+             meeting.get("id"), len(chunks), min(WORKERS, len(chunks)))
     client = client or OpenRouterClient()
     context = brief_text(meeting)
     voices = roster(meeting)
@@ -96,6 +99,8 @@ def build(
                 model=config.review_model(),
                 max_tokens=2500,
                 temperature=0.2,
+                timeout=REVIEW_TIMEOUT,
+                label=f"digest {i + 1}/{total}",
             )
         except LLMError as exc:
             # One unreadable section must not throw away the other fourteen. The

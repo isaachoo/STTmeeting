@@ -777,6 +777,25 @@ class TestJobs(unittest.TestCase):
         self.assertTrue(_wait(lambda: job.status == "done"))
         self.assertIsNotNone(jobs.get(job.id))
 
+    def test_a_cancelled_job_frees_the_meeting_and_drops_its_late_result(self):
+        release = threading.Event()
+        first = jobs.start(8, "test", "Testing", lambda job: release.wait(5) or "late")
+        cancelled = jobs.cancel(first.id)
+        self.assertEqual(cancelled.status, "cancelled")
+        self.assertIsNone(jobs.running_for(8), "the meeting is free at once")
+        second = jobs.start(8, "test", "Testing", lambda job: "fresh")
+        self.assertTrue(_wait(lambda: second.status == "done"))
+        release.set()
+        time.sleep(0.05)
+        self.assertEqual(first.status, "cancelled", "a cancelled job never turns into done")
+        self.assertIsNone(first.result)
+
+    def test_cancelling_an_unknown_or_finished_job(self):
+        self.assertIsNone(jobs.cancel("nope"))
+        job = jobs.start(9, "test", "Testing", lambda job: "ok")
+        self.assertTrue(_wait(lambda: job.status == "done"))
+        self.assertEqual(jobs.cancel(job.id).status, "done", "finished stays finished")
+
     def test_old_jobs_are_forgotten(self):
         ids = []
         for i in range(jobs.KEEP + 8):
@@ -1036,6 +1055,17 @@ class TestReviewApi(unittest.TestCase):
         self.assertEqual(result["status"], "done", result)
         self.assertTrue(result["result"]["built"])
         self.assertGreaterEqual(result["result"]["counts"]["decisions"], 1)
+
+    def test_a_running_job_can_be_cancelled_over_http(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        job = jobs.start(self.meeting_id, "test", "Testing", lambda j: release.wait(10))
+        payload = self._json(self.client.post(f"/api/jobs/{job.id}/cancel"))
+        self.assertEqual(payload["job"]["status"], "cancelled")
+        # and a new report job can start straight away
+        self._patch_client(FakeLLM(json_reply=DIGEST_REPLY, text_reply="# Minutes"))
+        response = self.client.post(f"/api/meetings/{self.meeting_id}/reports", json={"kind": "minutes"})
+        self.assertEqual(response.status_code, 202)
 
     def test_an_unknown_job_is_a_404(self):
         self.assertEqual(self.client.get("/api/jobs/nope").status_code, 404)

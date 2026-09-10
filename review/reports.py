@@ -13,7 +13,7 @@ import logging
 
 import config
 from copilot import prompts
-from copilot.llm import LLMError, OpenRouterClient
+from copilot.llm import REVIEW_TIMEOUT, LLMError, OpenRouterClient
 from storage import db, export
 
 from . import digest as digest_module
@@ -66,6 +66,8 @@ def generate(
         model=config.review_model(),
         max_tokens=_MAX_TOKENS.get(kind, 2000),
         temperature=0.3,
+        timeout=REVIEW_TIMEOUT,
+        label=f"report:{kind}",
     ).strip()
 
     if not body:
@@ -116,6 +118,8 @@ def draft_actions(
         model=config.review_model(),
         max_tokens=1500,
         temperature=0.2,
+        timeout=REVIEW_TIMEOUT,
+        label="draft actions",
     )
 
     proposals = []

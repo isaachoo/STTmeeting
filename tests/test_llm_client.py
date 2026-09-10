@@ -72,6 +72,28 @@ class TestReasoningIsOff(unittest.TestCase):
         self.assertEqual(c._session.bodies[0]["reasoning"], {"enabled": True})
 
 
+class TestLabelsAndTimeouts(unittest.TestCase):
+    def test_a_labelled_call_is_logged_with_its_shape(self):
+        c = client(reply("hello"))
+        with self.assertLogs("copilot.llm", level="INFO") as logs:
+            c.chat(MESSAGES, label="digest 3/14", model="m")
+        line = "\n".join(logs.output)
+        self.assertIn("digest 3/14", line)
+        self.assertIn("50 tokens out", line)
+        self.assertIn("finish=stop", line)
+
+    def test_an_unlabelled_call_stays_quiet_at_info(self):
+        c = client(reply("hello"))
+        with self.assertLogs("copilot.llm", level="DEBUG") as logs:
+            c.chat(MESSAGES)
+        self.assertTrue(all("DEBUG" in line for line in logs.output))
+
+    def test_the_review_timeout_is_longer_than_the_live_one(self):
+        from copilot.llm import REVIEW_TIMEOUT, TIMEOUT
+
+        self.assertGreater(REVIEW_TIMEOUT[1], TIMEOUT[1])
+
+
 class TestEmptyAnswers(unittest.TestCase):
     def test_an_empty_answer_says_why_not_did_not_return_json(self):
         c = client(reply("", finish="length", reasoning_tokens=1600))

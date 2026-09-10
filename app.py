@@ -657,6 +657,14 @@ def review_download_report(report_id: int):
     )
 
 
+@app.post("/api/jobs/<job_id>/cancel")
+def review_cancel_job(job_id: str):
+    job = review_jobs.cancel(job_id)
+    if job is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"job": job.as_dict()})
+
+
 @app.get("/api/jobs/<job_id>")
 def review_job(job_id: str):
     job = review_jobs.get(job_id)
