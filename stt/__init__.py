@@ -12,7 +12,7 @@ from .base import STTEngine, Utterance
 
 log = logging.getLogger(__name__)
 
-PROVIDERS = ("deepgram", "speechmatics", "local")
+PROVIDERS = ("deepgram", "speechmatics", "local", "qwen")
 
 
 def create_engine(
@@ -44,6 +44,23 @@ def create_engine(
             punctuation_dir=(
                 config.SHERPA_PUNCTUATION_DIR if config.SHERPA_PUNCTUATE else None
             ),
+            on_interim=on_interim,
+            on_utterance=on_utterance,
+            on_status=on_status,
+            on_error=on_error,
+        )
+
+    if provider == "qwen":
+        from .openrouter_asr import OpenRouterASR
+
+        return OpenRouterASR(
+            api_key=config.OPENROUTER_API_KEY,
+            sample_rate=sample_rate,
+            model=config.OPENROUTER_ASR_MODEL,
+            base_url=config.OPENROUTER_BASE_URL,
+            usd_per_minute=config.OPENROUTER_ASR_USD_PER_MINUTE,
+            max_segment_seconds=config.OPENROUTER_ASR_MAX_SEGMENT_SECONDS,
+            to_traditional=config.OPENROUTER_ASR_TO_TRADITIONAL,
             on_interim=on_interim,
             on_utterance=on_utterance,
             on_status=on_status,

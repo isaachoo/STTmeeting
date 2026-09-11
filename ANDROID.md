@@ -225,9 +225,10 @@ code for this: `config.py` reads `MEETING_DATA_DIR` and `app.py` reads
 `MEETING_TEMPLATE_DIR` / `MEETING_STATIC_DIR`, all optional.
 
 What the phone build leaves out: the **local (sherpa-onnx) transcriber**. It
-needs native libraries built for Android, which is a separate project. Deepgram
-and Speechmatics work; the transcriber dropdown will still list *Local*, and
-choosing it will fail with a clear message.
+needs native libraries built for Android, which is a separate project. Deepgram,
+Speechmatics and Qwen3-ASR via OpenRouter work (the last is pure Python and
+needs only the OpenRouter key); the transcriber dropdown will still list
+*Local*, and choosing it will fail with a clear message.
 
 ---
 

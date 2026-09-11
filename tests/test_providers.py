@@ -413,6 +413,15 @@ class TestPerLineSpeaker(unittest.TestCase):
         self.state.set_segment_speaker(0, "Alan")
         self.assertEqual(self.state.segments[0].label(), "Alan")
 
+    def test_the_transcriber_is_saved_with_the_meeting(self):
+        """Resuming an interrupted meeting picks the same engine again, and the
+        history can say which engine a transcript came from."""
+        mid = db.create_meeting("Heard by Qwen", {}, "zh-HK", "", provider="Qwen ")
+        self.assertEqual(db.get_meeting(mid)["provider"], "qwen")
+        self.assertIn("qwen", [m["provider"] for m in db.list_meetings()])
+        older = db.create_meeting("Unknown engine", {}, "zh-HK", "nova-3")
+        self.assertEqual(db.get_meeting(older)["provider"], "")
+
     def test_overrides_survive_to_the_exports(self):
         mid = db.create_meeting("Override", {}, "zh-HK", "nova-3")
         db.add_segment(mid, 0, 0.0, 0, "line one")

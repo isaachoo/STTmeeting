@@ -64,6 +64,7 @@ class MeetingSession:
                 brief=brief.as_dict(),
                 language=self.language,
                 stt_model=chosen_model,
+                provider=self.provider,
             )
             self.state = MeetingState(meeting_id=self.meeting_id, brief=brief)
         else:

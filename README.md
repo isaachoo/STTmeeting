@@ -196,7 +196,9 @@ knowing about:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `STT_PROVIDER` | `deepgram` | `deepgram`, `speechmatics`, or `local` — also selectable per meeting |
+| `STT_PROVIDER` | `deepgram` | `deepgram`, `speechmatics`, `local` or `qwen` — also selectable per meeting |
+| `OPENROUTER_ASR_MODEL` | `qwen/qwen3-asr-flash-2026-02-10` | The speech model behind the `qwen` transcriber |
+| `OPENROUTER_ASR_MAX_SEGMENT_SECONDS` | `12` | Longest stretch of speech sent as one request before it is cut mid-sentence |
 | `DEEPGRAM_LANGUAGE` | `zh-HK` | Cantonese Traditional |
 | `DEEPGRAM_MODELS` | `nova-3,nova-2` | Tried in order; falls back automatically if a model will not accept the language |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v3.2` | The advisor. Cheap and fast matters more than clever here |
@@ -213,20 +215,43 @@ knowing about:
 | `SPEAKER_GUESS_INTERVAL` | `120` | Seconds between attempts to work out which voice is whom |
 | `SAVE_AUDIO` | `0` | Write the raw meeting audio to `data/audio/` for later tuning |
 
-## Three transcribers
+## Four transcribers
 
 Chosen per meeting in the form, or set a default with `STT_PROVIDER`. The `stt/`
 package hides the differences, so everything downstream — naming, filtering,
 notes, exports — works the same whichever one is running.
 
-| | Deepgram | Speechmatics | Local (sherpa-onnx) |
-|---|---|---|---|
-| Cost per 5-hour meeting | ~$2.31 | ~$5.20 | **free** |
-| Audio leaves your machine | yes | yes | **no** |
-| Works offline | no | no | **yes** |
-| Speaker diarization | yes | yes | **no** |
-| Punctuation | yes | yes | with the extra model |
-| Extra setup | none | none | one download |
+| | Deepgram | Speechmatics | Local (sherpa-onnx) | Qwen3-ASR (OpenRouter) |
+|---|---|---|---|---|
+| Cost per 5-hour meeting | ~$2.31 | ~$5.20 | **free** | ~$0.63 |
+| Audio leaves your machine | yes | yes | **no** | yes |
+| Works offline | no | no | **yes** | no |
+| Speaker diarization | yes | yes | **no** | **no** |
+| English words inside Cantonese | weak | fair | good | **good** |
+| Lines appear | instantly | instantly | instantly | a few seconds after a pause |
+| Punctuation | yes | yes | with the extra model | yes |
+| Extra setup | none | none | one download | none — uses the OpenRouter key |
+
+### Qwen3-ASR through OpenRouter
+
+Alibaba's Qwen3-ASR is trained on Cantonese *and* on Chinese–English mixing
+inside one sentence, which is how a Hong Kong meeting actually sounds. It is
+reached with the OpenRouter key the copilot already uses, so there is nothing
+new to sign up for. Pick **Qwen3-ASR via OpenRouter** in the form, or set
+`STT_PROVIDER=qwen`.
+
+OpenRouter only offers the model file-by-file, not as a live stream, so the app
+builds its own stream: microphone audio is cut into short segments at pauses
+(or at `OPENROUTER_ASR_MAX_SEGMENT_SECONDS` during a long monologue), each one
+is posted, and the lines land in speech order a few seconds after they were
+said. The interim line shows *聽到 3s… 轉寫中 (1)* so you can see it working.
+The copilot, notes and review do not notice the difference — they work on
+finished lines anyway. Like the local engine it does not separate speakers;
+click a line to name it.
+
+A failed request loses that one segment and says so on the page; the meeting
+carries on. Output is converted from simplified to Hong Kong traditional
+characters automatically.
 
 ### Running transcription locally
 

@@ -36,13 +36,18 @@ def _bool(name: str, default: bool = False) -> bool:
 
 
 # --- Speech to text: which engine ---
-# deepgram | speechmatics | local
+# deepgram | speechmatics | local | qwen
 STT_PROVIDER = (os.getenv("STT_PROVIDER") or "deepgram").strip().lower()
 
 STT_PROVIDER_CHOICES = [
     {"code": "deepgram", "label": "Deepgram — cloud, fast, ~$0.0077/min"},
     {"code": "speechmatics", "label": "Speechmatics — cloud, Cantonese + diarization"},
     {"code": "local", "label": "Local (sherpa-onnx) — offline, free, no diarization"},
+    {
+        "code": "qwen",
+        "label": "Qwen3-ASR via OpenRouter — Cantonese + English mixed, ~$0.002/min, "
+                 "a few seconds behind, no diarization",
+    },
 ]
 
 # --- Deepgram ---
@@ -126,6 +131,22 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_BASE_URL = os.getenv(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 ).rstrip("/")
+
+# --- Qwen3-ASR through OpenRouter (provider "qwen") ---
+# Alibaba's speech model, trained on Cantonese with English mixed in. OpenRouter
+# only offers it file-by-file, so the app cuts the microphone into short
+# segments at pauses and posts each one; lines arrive a few seconds late.
+OPENROUTER_ASR_MODEL = (
+    os.getenv("OPENROUTER_ASR_MODEL") or "qwen/qwen3-asr-flash-2026-02-10"
+).strip()
+# Longest one segment may run before it is cut mid-sentence. Shorter = less lag,
+# more requests, more chance of cutting a word in half.
+OPENROUTER_ASR_MAX_SEGMENT_SECONDS = _float("OPENROUTER_ASR_MAX_SEGMENT_SECONDS", 12)
+# $0.000035 per second on OpenRouter at the time of writing.
+OPENROUTER_ASR_USD_PER_MINUTE = _float("OPENROUTER_ASR_USD_PER_MINUTE", 0.0021)
+# Qwen writes simplified characters for Cantonese speech; OpenCC maps them to
+# Hong Kong traditional.
+OPENROUTER_ASR_TO_TRADITIONAL = _bool("OPENROUTER_ASR_TO_TRADITIONAL", True)
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v3.2").strip()
 OPENROUTER_NOTES_MODEL = (
     os.getenv("OPENROUTER_NOTES_MODEL", "").strip() or OPENROUTER_MODEL
@@ -219,7 +240,8 @@ def missing_keys(provider: str | None = None) -> list[str]:
     """Keys the app cannot run without, for the chosen transcriber.
 
     The local engine needs no speech key at all, so demanding one would block a
-    setup that is perfectly able to run.
+    setup that is perfectly able to run. Qwen3-ASR goes through OpenRouter, so
+    the LLM key covers it.
     """
     provider = (provider or STT_PROVIDER or "deepgram").strip().lower()
     missing = []

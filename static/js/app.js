@@ -1120,7 +1120,7 @@ function renderSpeakerChips() {
     // Without this the panel head just looks broken.
     const hint = document.createElement('span');
     hint.className = 'muted small';
-    hint.textContent = provider === 'local'
+    hint.textContent = (provider === 'local' || provider === 'qwen')
       ? 'no speaker separation — click a line to name it'
       : 'listening for voices…';
     ui.speakerChips.append(hint);
@@ -1812,6 +1812,9 @@ function paintSnapshot(snap, fresh) {
     // page, so the meeting continues on the server but deaf to this one).
     setRunning(true);
     setPaused(!!snap.paused);
+    // The chips were drawn above while `running` was still false, so the
+    // "no speaker separation" hint for engines that do not diarise was skipped.
+    renderSpeakerChips();
     if (fresh) {
       ui.statusText.textContent = snap.resumed ? 'continuing the meeting…' : 'listening…';
     } else if (workletNode) {

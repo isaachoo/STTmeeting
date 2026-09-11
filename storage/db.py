@@ -145,12 +145,12 @@ def init() -> None:
 
 
 def create_meeting(
-    title: str, brief: dict, language: str, stt_model: str
+    title: str, brief: dict, language: str, stt_model: str, provider: str = ""
 ) -> int:
     with _connect() as conn:
         cur = conn.execute(
             "INSERT INTO meetings (title, brief, brief_json, started_at, language,"
-            " stt_model) VALUES (?, ?, ?, ?, ?, ?)",
+            " stt_model, provider) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 title,
                 # A plain-text copy so the row is readable without unpacking JSON.
@@ -159,6 +159,10 @@ def create_meeting(
                 time.time(),
                 language,
                 stt_model,
+                # Which transcriber heard this meeting -- resuming an interrupted
+                # one picks the same engine again, and the history says which
+                # engine a transcript came from when comparing them.
+                (provider or "").strip().lower(),
             ),
         )
         return int(cur.lastrowid)
