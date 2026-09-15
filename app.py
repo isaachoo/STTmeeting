@@ -235,6 +235,19 @@ def finish_interrupted(meeting_id: int):
     return jsonify({"finished": meeting_id})
 
 
+@app.delete("/api/meetings/<int:meeting_id>")
+def delete_meeting(meeting_id: int):
+    """Remove a meeting for good: transcript, notes, reports, questions, audio."""
+    if _is_live(meeting_id):
+        return jsonify({"error": "That meeting is running; press Stop first."}), 409
+    if review_jobs.running_for(meeting_id) is not None:
+        return jsonify({"error": "A report is being written for that meeting; cancel it first."}), 409
+    if not db.delete_meeting(meeting_id):
+        return jsonify({"error": "no such meeting"}), 404
+    log.info("meeting %s deleted", meeting_id)
+    return jsonify({"deleted": meeting_id})
+
+
 # ------------------------------------------------------------ general chat
 #
 # The side-panel assistant. Not about the meeting -- that is the Copilot panel's

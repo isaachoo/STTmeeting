@@ -748,6 +748,31 @@ async function finishInterrupted(meeting) {
   loadHistory();
 }
 
+async function deleteMeeting(meeting) {
+  const name = meeting.title || `Meeting ${meeting.id}`;
+  const lines = meeting.segments || 0;
+  const ok = confirm(
+    `Delete "${name}"?\n\nThis removes its ${lines} transcript line${lines === 1 ? '' : 's'}, `
+    + 'notes, reports, questions and saved audio for good. There is no undo.'
+  );
+  if (!ok) return;
+  try {
+    const response = await fetch(`/api/meetings/${meeting.id}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error((await response.json()).error || response.statusText);
+    log(`deleted ${name}`);
+    // The banner for a meeting that no longer exists would be a broken link.
+    if (meetingId === meeting.id && !running) {
+      ui.finishedBanner.hidden = true;
+      ui.btnReview.hidden = true;
+    }
+  } catch (err) {
+    log(`could not delete ${name}: ${err.message}`, true);
+    alert(`Could not delete ${name}: ${err.message}`);
+  }
+  await checkInterrupted();
+  loadHistory();
+}
+
 ui.btnResume.addEventListener('click', () => { if (interrupted) resumeMeeting(interrupted); });
 ui.btnFinishInterrupted.addEventListener('click', () => { if (interrupted) finishInterrupted(interrupted); });
 
@@ -1102,6 +1127,18 @@ async function loadHistory() {
         link.style.marginLeft = '8px';
         links.append(link);
       });
+      if (!meeting.running) {
+        const remove = document.createElement('a');
+        remove.href = '#';
+        remove.className = 'danger';
+        remove.textContent = 'Delete';
+        remove.title = 'Remove this meeting and everything recorded about it';
+        remove.addEventListener('click', (event) => {
+          event.preventDefault();
+          deleteMeeting(meeting);
+        });
+        links.append(remove);
+      }
 
       row.append(left, links);
       ui.history.append(row);

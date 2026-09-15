@@ -594,6 +594,72 @@ class TestContinuityApi(unittest.TestCase):
         self.assertIsNotNone(db.get_meeting(meeting["id"])["ended_at"])
         self.assertEqual(self.client.post(f"/api/meetings/{meeting['id']}/finish").status_code, 404)
 
+    def test_deleting_a_meeting_removes_everything_about_it(self):
+        meeting = stored_meeting(finished=True)
+        mid = meeting["id"]
+        other = stored_meeting(finished=True)
+        db.add_action(mid, "Alan", "hire one")
+        db.save_report(mid, "minutes", "Minutes", "body", "model")
+        db.add_chat_turn(mid, "q", "a", [], 0.0)
+        config.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+        audio = config.AUDIO_DIR / f"meeting-{mid}.wav"
+        audio.write_bytes(b"RIFF")
+
+        response = self.client.delete(f"/api/meetings/{mid}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._json(response), {"deleted": mid})
+
+        self.assertIsNone(db.get_meeting(mid))
+        self.assertEqual(db.list_actions(mid), [])
+        self.assertEqual(db.list_reports(mid), [])
+        self.assertEqual(db.list_chat(mid), [])
+        self.assertFalse(audio.exists())
+        with db._connect() as conn:
+            for table in ("segments", "events"):
+                count = conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE meeting_id = ?", (mid,)
+                ).fetchone()["n"]
+                self.assertEqual(count, 0, table)
+        # The neighbour is untouched.
+        self.assertEqual(len(db.get_meeting(other["id"])["segments"]), len(LINES))
+        self.assertNotIn(mid, [m["id"] for m in self._json(self.client.get("/api/meetings"))])
+        self.assertEqual(self.client.get(f"/review/{mid}").status_code, 404)
+
+    def test_deleting_twice_or_a_missing_meeting_is_a_404(self):
+        meeting = stored_meeting(finished=True)
+        self.assertEqual(self.client.delete(f"/api/meetings/{meeting['id']}").status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/meetings/{meeting['id']}").status_code, 404)
+        self.assertEqual(self.client.delete("/api/meetings/999999").status_code, 404)
+
+    def test_a_running_meeting_cannot_be_deleted(self):
+        meeting = stored_meeting()
+
+        class Live:
+            meeting_id = meeting["id"]
+            stopped = False
+
+        self.app_module._session = Live()
+        self.addCleanup(setattr, self.app_module, "_session", None)
+        response = self.client.delete(f"/api/meetings/{meeting['id']}")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Stop", self._json(response)["error"])
+        self.assertIsNotNone(db.get_meeting(meeting["id"]))
+
+    def test_a_meeting_with_a_report_in_progress_cannot_be_deleted(self):
+        from review import jobs
+
+        meeting = stored_meeting(finished=True)
+        gate = threading.Event()
+        job = jobs.start(meeting["id"], "report", "minutes", lambda progress: gate.wait(5) or {})
+        try:
+            response = self.client.delete(f"/api/meetings/{meeting['id']}")
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("cancel it first", self._json(response)["error"])
+        finally:
+            gate.set()
+            jobs.cancel(job.id)
+        self.assertIsNotNone(db.get_meeting(meeting["id"]))
+
     def test_a_running_meeting_cannot_be_closed_from_here(self):
         meeting = stored_meeting()
 

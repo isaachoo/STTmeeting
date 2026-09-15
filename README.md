@@ -24,8 +24,11 @@ Stop, it writes the final notes.
 ```
 
 Cost, exports, API keys and history live in the **Session** drawer in the title
-bar. When the meeting stops, the **review workspace** takes over: search the
-transcript, ask it questions, curate the action items, and generate the minutes.
+bar. When the meeting stops, the console clears itself for the next one and the
+**review workspace** takes over: search the transcript, ask it questions, curate
+the action items, and generate the minutes. Every past meeting is listed under
+**Session ▸ Past meetings** with Review, MD and JSON export, and **Delete**,
+which removes the meeting and everything recorded about it after a confirmation.
 
 ## Two places to ask
 

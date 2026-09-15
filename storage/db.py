@@ -585,6 +585,30 @@ def delete_brief(brief_id: int) -> bool:
         return conn.execute("DELETE FROM briefs WHERE id = ?", (brief_id,)).rowcount > 0
 
 
+# Every table that hangs off a meeting. Listed here rather than relying on
+# ON DELETE CASCADE, which the schema never declared and SQLite only enforces
+# when foreign keys are switched on per connection.
+_MEETING_CHILD_TABLES = ("segments", "events", "action_items", "reports", "review_chat")
+
+
+def delete_meeting(meeting_id: int) -> bool:
+    """Remove a meeting and everything recorded about it. Returns False if
+    there was no such meeting. Does not touch saved backgrounds, which belong
+    to the user, not to any one meeting."""
+    with _connect() as conn:
+        for table in _MEETING_CHILD_TABLES:
+            conn.execute(f"DELETE FROM {table} WHERE meeting_id = ?", (meeting_id,))
+        deleted = conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,)).rowcount > 0
+    if deleted:
+        # Saved audio, when SAVE_AUDIO was on. Missing is fine.
+        try:
+            (config.AUDIO_DIR / f"meeting-{meeting_id}.wav").unlink(missing_ok=True)
+        except OSError:
+            log.warning("could not remove the audio file for meeting %s", meeting_id)
+        checkpoint()
+    return deleted
+
+
 def _json_list(raw) -> list:
     if isinstance(raw, list):
         return raw
