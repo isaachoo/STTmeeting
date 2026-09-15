@@ -147,6 +147,10 @@ OPENROUTER_ASR_USD_PER_MINUTE = _float("OPENROUTER_ASR_USD_PER_MINUTE", 0.0021)
 # Qwen writes simplified characters for Cantonese speech; OpenCC maps them to
 # Hong Kong traditional.
 OPENROUTER_ASR_TO_TRADITIONAL = _bool("OPENROUTER_ASR_TO_TRADITIONAL", True)
+# Loudness (RMS of 16-bit samples, 0-32768) a frame must reach to count as
+# speech. The page shows the live level next to this threshold while idle;
+# lower it if a quiet microphone never crosses it.
+OPENROUTER_ASR_SPEECH_FLOOR = _float("OPENROUTER_ASR_SPEECH_FLOOR", 120)
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v3.2").strip()
 OPENROUTER_NOTES_MODEL = (
     os.getenv("OPENROUTER_NOTES_MODEL", "").strip() or OPENROUTER_MODEL

@@ -55,9 +55,14 @@ MAX_SEGMENT_SECONDS = 12.0  # hard ceiling; cut here even mid-sentence
 PRE_ROLL_SECONDS = 0.4  # quiet kept in front of speech so word onsets survive
 
 # Energy detector. RMS of 16-bit samples (0..32768).
-ABSOLUTE_FLOOR = 250.0  # below this is always silence, whatever the room
+ABSOLUTE_FLOOR = 120.0  # below this is always silence, whatever the room
 SPEECH_RATIO = 3.0  # speech must be this many times louder than the noise floor
 NOISE_ADAPT = 0.05  # how fast the noise floor follows quiet frames
+# If this much audio goes by without a single frame counted as speech, say so
+# on the page with the levels seen, so a quiet microphone is not mistaken for a
+# broken transcriber.
+QUIET_WARNING_SECONDS = 15.0
+PROBE_SECONDS = 1.0  # silence sent at start to prove key, model and endpoint
 
 
 class OpenRouterASR(STTEngine):
@@ -70,6 +75,8 @@ class OpenRouterASR(STTEngine):
         usd_per_minute: float = 0.0,
         max_segment_seconds: float = MAX_SEGMENT_SECONDS,
         to_traditional: bool = True,
+        speech_floor: float = ABSOLUTE_FLOOR,
+        probe: bool = True,
         on_interim=None,
         on_utterance=None,
         on_status=None,
@@ -83,6 +90,8 @@ class OpenRouterASR(STTEngine):
         self._usd_per_minute = float(usd_per_minute)
         self.max_segment_seconds = max(MIN_SEGMENT_SECONDS + 1.0, float(max_segment_seconds))
         self.to_traditional = to_traditional
+        self.speech_floor = max(20.0, float(speech_floor or ABSOLUTE_FLOOR))
+        self.probe = probe
 
         self._on_interim = on_interim or (lambda text: None)
         self._on_utterance = on_utterance or (lambda utt: None)
@@ -106,8 +115,16 @@ class OpenRouterASR(STTEngine):
         self._silence_run = 0.0
         self._pre_roll: deque[bytes] = deque()
         self._pre_roll_bytes = 0
-        self._noise_floor = ABSOLUTE_FLOOR
+        # Starts so that the threshold is exactly the configured floor; it only
+        # rises from there as the room's own noise is learnt.
+        self._noise_floor = self.speech_floor / SPEECH_RATIO
         self._last_interim_at = 0.0
+        # Diagnostics for the "nothing happens" case.
+        self._last_rms = 0.0
+        self._peak_rms = 0.0
+        self._speech_frames = 0
+        self._quiet_warned = False
+        self._shape_warned = False
 
         # Results are emitted in speech order even when a later request is
         # answered first.
@@ -179,11 +196,18 @@ class OpenRouterASR(STTEngine):
             return
         self._load_converter()
         self._pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="openrouter-asr")
-        self._on_status(
-            state="listening",
-            model=self.model,
-            detail="near-real time: lines arrive a few seconds after a pause",
-        )
+        self._on_status(state="connecting", detail="checking OpenRouter and the Qwen3-ASR model")
+        if self.probe and not self._probe():
+            # The error has already been reported. Keep listening anyway: a
+            # rate limit at start is not a reason to lose the meeting.
+            self._on_status(state="listening", model=self.model,
+                            detail="the start-up check failed; still trying each segment")
+        else:
+            self._on_status(
+                state="listening",
+                model=self.model,
+                detail="near-real time: lines arrive a few seconds after a pause",
+            )
         try:
             while True:
                 chunk = self._take_chunk()
@@ -243,6 +267,7 @@ class OpenRouterASR(STTEngine):
                 limit = int(PRE_ROLL_SECONDS * self.sample_rate * 2)
                 while self._pre_roll_bytes > limit and len(self._pre_roll) > 1:
                     self._pre_roll_bytes -= len(self._pre_roll.popleft())
+            self._show_listening()  # idle: the level readout
             return
 
         self._segment.extend(chunk)
@@ -255,17 +280,38 @@ class OpenRouterASR(STTEngine):
         elif self._silence_run >= PAUSE_SECONDS and length >= MIN_SEGMENT_SECONDS:
             self._close_segment(reason="pause")
 
+    @property
+    def threshold(self) -> float:
+        return max(self.speech_floor, self._noise_floor * SPEECH_RATIO)
+
     def _is_speech(self, chunk: bytes) -> bool:
         rms = _rms(chunk)
-        if rms < max(ABSOLUTE_FLOOR, self._noise_floor * SPEECH_RATIO):
+        self._last_rms = rms
+        self._peak_rms = max(self._peak_rms, rms)
+        if rms < self.threshold:
             # Quiet: let the noise floor drift towards it. Fast when the room
             # gets quieter, slow when it gets louder so speech is not learnt
             # as noise.
             rate = NOISE_ADAPT if rms < self._noise_floor else NOISE_ADAPT / 4
             self._noise_floor += (rms - self._noise_floor) * rate
-            self._noise_floor = max(self._noise_floor, ABSOLUTE_FLOOR / SPEECH_RATIO)
+            self._noise_floor = max(self._noise_floor, self.speech_floor / SPEECH_RATIO)
+            self._check_quiet()
             return False
+        self._speech_frames += 1
         return True
+
+    def _check_quiet(self) -> None:
+        """A microphone that never crosses the threshold looks exactly like a
+        transcriber that does nothing. Say which it is, once."""
+        if self._quiet_warned or self._speech_frames or self.audio_seconds < QUIET_WARNING_SECONDS:
+            return
+        self._quiet_warned = True
+        self._on_error(
+            f"Qwen3-ASR has heard {self.audio_seconds:.0f}s of audio but nothing loud enough "
+            f"to count as speech: microphone level peaks at {self._peak_rms:.0f}, the speech "
+            f"threshold is {self.threshold:.0f}. Move closer to the microphone, raise its "
+            "input level in Windows sound settings, or lower OPENROUTER_ASR_SPEECH_FLOOR."
+        )
 
     def _close_segment(self, reason: str) -> None:
         pcm = bytes(self._segment)
@@ -300,6 +346,10 @@ class OpenRouterASR(STTEngine):
             parts.append(f"聽到 {len(self._segment) / (2 * self.sample_rate):.0f}s…")
         if self._pending:
             parts.append(f"轉寫中 ({len(self._pending)})")
+        if not parts and self.audio_seconds > 0:
+            # Idle: show the level so a too-quiet microphone is visible at a
+            # glance rather than looking like a dead transcriber.
+            parts.append(f"音量 {self._last_rms:.0f} / 門檻 {self.threshold:.0f}")
         self._on_interim(" ".join(parts))
 
     # ----------------------------------------------------------------- results
@@ -368,14 +418,79 @@ class OpenRouterASR(STTEngine):
                     self.reported_cost_usd += float(usage.get("cost") or 0.0)
                 except (TypeError, ValueError):
                     pass
-            text = payload.get("text") if isinstance(payload, dict) else None
-            log.debug(
+            text = _extract_text(payload)
+            if text is None:
+                # Answered, but not in a shape this code knows. Silence here
+                # would look like a broken microphone; say what came back.
+                shape = _describe_shape(payload)
+                log.warning("asr %s: unrecognised response: %s", self.model_name, shape)
+                if not self._shape_warned:
+                    self._shape_warned = True
+                    self._on_error(
+                        "OpenRouter answered, but not with a transcript this app "
+                        f"understands: {shape}. Please report this."
+                    )
+                return ""
+            log.info(
                 "asr %s: %.1fs audio -> %d chars in %.1fs",
                 self.model_name, len(pcm) / (2 * self.sample_rate),
-                len(text or ""), time.monotonic() - started,
+                len(text), time.monotonic() - started,
             )
             self.consecutive_failures = 0
-            return self._finish_text(text or "")
+            return self._finish_text(text)
+
+    def _probe(self) -> bool:
+        """One second of silence, sent before the meeting starts.
+
+        Costs a few thousandths of a cent and turns 'nothing happens' into a
+        message on the page within seconds when the key, the model name or the
+        endpoint is wrong. Silence, so the model has nothing to hallucinate.
+        """
+        started = time.monotonic()
+        try:
+            resp = self._http.post(
+                f"{self.base_url}/audio/transcriptions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "X-Title": "Cantonese Meeting Copilot",
+                },
+                json={
+                    "model": self.model_name,
+                    "input_audio": {
+                        "data": _wav_base64(b"\x00\x00" * int(PROBE_SECONDS * self.sample_rate), self.sample_rate),
+                        "format": "wav",
+                    },
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            self._on_error(f"Qwen3-ASR start-up check: could not reach OpenRouter ({exc}).")
+            return False
+        self.requests_made += 1
+        if resp.status_code >= 400:
+            self._on_error(f"Qwen3-ASR start-up check failed: {_describe_http_error(resp)}.")
+            return False
+        try:
+            payload = resp.json()
+        except ValueError:
+            self._on_error("Qwen3-ASR start-up check: OpenRouter returned something that was not JSON.")
+            return False
+        if isinstance(payload, dict) and payload.get("error"):
+            err = payload["error"]
+            message = err.get("message") if isinstance(err, dict) else str(err)
+            self._on_error(f"Qwen3-ASR start-up check failed: {message}.")
+            return False
+        if _extract_text(payload) is None:
+            shape = _describe_shape(payload)
+            self._shape_warned = True
+            self._on_error(
+                "Qwen3-ASR start-up check: OpenRouter answered, but not with a transcript "
+                f"this app understands: {shape}. Please report this."
+            )
+            return False
+        log.info("asr %s: start-up check passed in %.1fs", self.model_name, time.monotonic() - started)
+        return True
 
     def _fail(self, reason: str) -> str:
         self.failures += 1
@@ -441,6 +556,41 @@ def _wav_base64(pcm: bytes, sample_rate: int) -> str:
         w.setframerate(sample_rate)
         w.writeframes(pcm)
     return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _extract_text(payload) -> str | None:
+    """The transcript out of whatever shape OpenRouter used; None if unknown.
+
+    The documented shape is {"text": ...}. Some providers behind OpenRouter
+    have answered in chat-completion form instead, and an empty transcript is
+    a legitimate answer for silence, so "" and None mean different things.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in ("text", "transcript", "transcription"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            )
+    segments = payload.get("segments")
+    if isinstance(segments, list) and segments and all(isinstance(s, dict) for s in segments):
+        return " ".join(str(s.get("text", "")) for s in segments).strip()
+    return None
+
+
+def _describe_shape(payload) -> str:
+    if isinstance(payload, dict):
+        return "object with keys " + ", ".join(sorted(map(str, payload.keys()))[:12])
+    return f"{type(payload).__name__}: {str(payload)[:120]}"
 
 
 def _describe_http_error(resp) -> str:

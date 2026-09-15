@@ -100,6 +100,7 @@ def make_engine(session, **kw):
         api_key="or-test", sample_rate=RATE, model="qwen/test-asr",
         base_url="https://example.test/api/v1", usd_per_minute=0.0021,
         to_traditional=kw.pop("to_traditional", False),
+        probe=kw.pop("probe", False),  # the start-up check has its own tests
         on_interim=interims.append, on_utterance=utterances.append,
         on_status=lambda **s: statuses.append(s), on_error=errors.append,
         session=session, **kw,
@@ -182,7 +183,7 @@ class TestRequest(unittest.TestCase):
         self.assertAlmostEqual(utterances[0].start, 0.0, delta=0.6)
         self.assertGreater(utterances[0].end, utterances[0].start)
         self.assertEqual(errors, [])
-        self.assertEqual(statuses[0]["state"], "listening")
+        self.assertIn("listening", [s["state"] for s in statuses])
         self.assertEqual(statuses[-1]["state"], "closed")
         self.assertAlmostEqual(engine.audio_seconds, 3.0, delta=0.15)
 
@@ -318,6 +319,95 @@ class TestOrderingAndFailures(unittest.TestCase):
         self.assertEqual(session.calls, [])
 
 
+class TestStartUpCheck(unittest.TestCase):
+    """The probe turns 'nothing happens' into a message within seconds."""
+
+    def test_a_passing_probe_costs_one_silent_request_and_reports_listening(self):
+        session = FakeSession(replies=[FakeResponse(200, {"text": ""}), FakeResponse(200, {"text": "hello"})])
+        engine, interims, utterances, statuses, errors = make_engine(session, probe=True)
+        run_audio(engine, tone(1.5), trailing=1.0)
+        self.assertTrue(wait_for(lambda: utterances, 10), errors)
+        finish(engine)
+        self.assertEqual(len(session.calls), 2)
+        probe = base64.b64decode(session.calls[0]["json"]["input_audio"]["data"])
+        with wave.open(io.BytesIO(probe)) as w:
+            frames = w.readframes(w.getnframes())
+        self.assertEqual(frames, b"\x00" * len(frames), "the probe must be silence")
+        self.assertEqual([s["state"] for s in statuses][:2], ["connecting", "listening"])
+        self.assertIn("near-real time", statuses[1]["detail"])
+        self.assertEqual(errors, [])
+
+    def test_a_bad_model_name_is_reported_before_anyone_speaks(self):
+        session = FakeSession(replies=[FakeResponse(404, {"error": {"message": "No endpoints found"}})])
+        engine, interims, utterances, statuses, errors = make_engine(session, probe=True)
+        engine.start()
+        self.assertTrue(wait_for(lambda: errors, 10))
+        finish(engine)
+        self.assertIn("start-up check failed", errors[0])
+        self.assertIn("OPENROUTER_ASR_MODEL", errors[0])
+        # Still listening: a transient failure at start must not lose the meeting.
+        self.assertEqual(statuses[1]["state"], "listening")
+        self.assertIn("start-up check failed", statuses[1]["detail"])
+
+    def test_an_unknown_response_shape_is_named_not_swallowed(self):
+        session = FakeSession(replies=[FakeResponse(200, {"result": {"words": []}})])
+        engine, interims, utterances, statuses, errors = make_engine(session, probe=True)
+        engine.start()
+        self.assertTrue(wait_for(lambda: errors, 10))
+        finish(engine)
+        self.assertIn("not with a transcript this app understands", errors[0])
+        self.assertIn("result", errors[0])
+
+
+class TestResponseShapes(unittest.TestCase):
+    def test_documented_and_chat_style_answers_both_yield_text(self):
+        extract = openrouter_asr._extract_text
+        self.assertEqual(extract({"text": "a"}), "a")
+        self.assertEqual(extract({"text": ""}), "")
+        self.assertEqual(extract({"choices": [{"message": {"content": "b"}}]}), "b")
+        self.assertEqual(
+            extract({"choices": [{"message": {"content": [{"type": "text", "text": "c"}]}}]}), "c"
+        )
+        self.assertEqual(extract({"segments": [{"text": "d"}, {"text": "e"}]}), "d e")
+        self.assertIsNone(extract({"result": 1}))
+        self.assertIsNone(extract("nope"))
+
+    def test_a_chat_style_answer_becomes_a_line_in_the_meeting(self):
+        session = FakeSession(replies=[FakeResponse(200, {"choices": [{"message": {"content": "從 chat 來"}}]})])
+        engine, interims, utterances, statuses, errors = make_engine(session)
+        run_audio(engine, tone(1.5), trailing=1.0)
+        self.assertTrue(wait_for(lambda: utterances, 10), errors)
+        finish(engine)
+        self.assertEqual(utterances[0].text, "從 chat 來")
+        self.assertEqual(errors, [])
+
+
+class TestQuietMicrophone(unittest.TestCase):
+    def test_a_microphone_that_never_reaches_the_threshold_is_explained(self):
+        session = FakeSession()
+        engine, interims, utterances, statuses, errors = make_engine(session)
+        engine.start()
+        # Sixteen seconds of a faint hum: audible on a meter, never speech.
+        for chunk in in_chunks(tone(16.0, amplitude=60)):
+            engine.send_audio(chunk)
+        self.assertTrue(wait_for(lambda: errors, 15), interims[-3:])
+        finish(engine)
+        self.assertEqual(session.calls, [], "no request for audio that was never speech")
+        self.assertIn("nothing loud enough to count as speech", errors[0])
+        self.assertIn("the speech threshold is 1", errors[0])  # 120, or a little above
+        self.assertIn("OPENROUTER_ASR_SPEECH_FLOOR", errors[0])
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(any("音量" in t and "門檻" in t for t in interims), interims[-3:])
+
+    def test_a_lower_floor_lets_a_quiet_voice_through(self):
+        session = FakeSession()
+        engine, interims, utterances, statuses, errors = make_engine(session, speech_floor=40)
+        run_audio(engine, tone(1.5, amplitude=90), trailing=1.0)
+        self.assertTrue(wait_for(lambda: utterances, 10), errors)
+        finish(engine)
+        self.assertEqual(len(session.calls), 1)
+
+
 class TestTraditionalConversion(unittest.TestCase):
     def test_simplified_output_becomes_hong_kong_traditional(self):
         try:
@@ -341,12 +431,13 @@ class TestEnergyDetector(unittest.TestCase):
 
     def test_the_noise_floor_learns_a_loud_room(self):
         engine, *_ = make_engine(FakeSession())
-        # A steady hum below the speech ratio is learnt as background...
-        for _ in range(60):
-            engine._is_speech(tone(0.1, amplitude=400))
-        self.assertGreater(engine._noise_floor, 200)
-        # ...so a voice must clear it by the ratio to count.
-        self.assertFalse(engine._is_speech(tone(0.1, amplitude=500)))
+        # A steady hum under the floor is learnt as background...
+        for _ in range(200):  # twenty seconds; it learns upward on purpose slowly
+            engine._is_speech(tone(0.1, amplitude=150))  # rms ~106
+        self.assertGreater(engine._noise_floor, 90)
+        self.assertGreater(engine.threshold, 250)
+        # ...so a voice must clear it by the ratio to count, not just the floor.
+        self.assertFalse(engine._is_speech(tone(0.1, amplitude=300)))  # rms ~212
         self.assertTrue(engine._is_speech(tone(0.1, amplitude=3000)))
 
     def test_wav_helper_produces_a_readable_file(self):

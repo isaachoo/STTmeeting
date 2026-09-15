@@ -253,6 +253,14 @@ A failed request loses that one segment and says so on the page; the meeting
 carries on. Output is converted from simplified to Hong Kong traditional
 characters automatically.
 
+When a meeting starts it first sends one second of silence as a check, so a
+wrong key, a wrong model name or an unreachable endpoint shows up as a red
+message within seconds instead of a transcript that never fills. While nobody
+is speaking the interim line shows the microphone level against the speech
+threshold (*音量 85 / 門檻 120*); if fifteen seconds go by without the level ever
+crossing it, the page says so and names `OPENROUTER_ASR_SPEECH_FLOOR` as the
+dial to lower.
+
 ### Running transcription locally
 
 ```bash

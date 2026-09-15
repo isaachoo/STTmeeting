@@ -61,6 +61,7 @@ def create_engine(
             usd_per_minute=config.OPENROUTER_ASR_USD_PER_MINUTE,
             max_segment_seconds=config.OPENROUTER_ASR_MAX_SEGMENT_SECONDS,
             to_traditional=config.OPENROUTER_ASR_TO_TRADITIONAL,
+            speech_floor=config.OPENROUTER_ASR_SPEECH_FLOOR,
             on_interim=on_interim,
             on_utterance=on_utterance,
             on_status=on_status,
